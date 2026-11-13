@@ -55,7 +55,26 @@ CREATE TABLE IF NOT EXISTS installs (
     updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);
+CREATE TABLE IF NOT EXISTS translations (
+    src_hash TEXT PRIMARY KEY,
+    lang     TEXT NOT NULL,
+    text     TEXT NOT NULL
+);
 """
+
+# additive migrations (safe to run every start)
+MIGRATIONS = [
+    ("installs", "ref", "TEXT"),                # e.g. mcp:rea  |  skill:local-skill-...  |  app:<pkg>
+    ("installs", "package", "TEXT"),            # npm/pypi package or repo for version checks
+    ("installs", "installed_version", "TEXT"),  # version or commit sha
+    ("installs", "latest_version", "TEXT"),
+    ("installs", "enabled", "INTEGER"),         # 1 on, 0 off, NULL unknown
+    ("installs", "skill_path", "TEXT"),         # folder inside the repo for skills
+    ("installs", "synced_at", "TEXT"),
+    ("items", "skills", "TEXT"),                # JSON list of {path, name, description}
+    ("items", "description_id", "TEXT"),        # Indonesian translation
+    ("items", "default_branch", "TEXT"),
+]
 
 
 def connect(path: str = DB_PATH) -> sqlite3.Connection:
@@ -63,6 +82,11 @@ def connect(path: str = DB_PATH) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    for table, col, typ in MIGRATIONS:
+        cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    con.commit()
     return con
 
 

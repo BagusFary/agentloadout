@@ -89,6 +89,12 @@ def queries():
         ("app", f"topic:claude-code {base}", 2),
         ("app", f"topic:codex-cli {base}", 1),
         ("app", f"topic:claude-code created:>{recent} {base}", 1),
+        # repos that do not use GitHub topics
+        ("mcp", '"mcp server" in:name,description stars:>=200 fork:false', 2),
+        ("mcp", '"model context protocol" in:description stars:>=150 fork:false', 1),
+        ("skill", '"agent skills" in:description stars:>=150 fork:false', 1),
+        ("skill", '"claude code skill" in:description stars:>=100 fork:false', 1),
+        ("skill", '"SKILL.md" in:readme stars:>=150 fork:false', 1),
     ]
 
 
@@ -99,7 +105,11 @@ _cache = {}
 
 
 def load_cache():
-    global _cache
+    global _cache, _skills_cache
+    try:
+        _skills_cache = json.load(open(SKILLS_CACHE_PATH))
+    except (OSError, ValueError):
+        _skills_cache = {}
     try:
         _cache = json.load(open(CACHE_PATH))
     except (OSError, ValueError):
@@ -107,6 +117,9 @@ def load_cache():
 
 
 def save_cache():
+    tmp2 = SKILLS_CACHE_PATH + ".tmp"
+    json.dump(_skills_cache, open(tmp2, "w"))
+    os.replace(tmp2, SKILLS_CACHE_PATH)
     tmp = CACHE_PATH + ".tmp"
     json.dump(_cache, open(tmp, "w"))
     os.replace(tmp, CACHE_PATH)
@@ -153,6 +166,46 @@ def skill_paths(full, branch):
     paths = [t["path"] for t in r.json().get("tree", []) if t["path"].endswith("SKILL.md")]
     dirs = sorted({os.path.dirname(p) or "." for p in paths})
     return dirs[:200]
+
+
+SKILLS_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "skills_cache.json")
+_skills_cache = {}
+RAW = requests.Session()
+RAW.headers.update({"User-Agent": UA})
+
+
+def frontmatter(text):
+    m = re.match(r"^---\s*\n(.*?)\n---", text, re.S)
+    out = {}
+    if not m:
+        return out
+    key = None
+    for line in m.group(1).splitlines():
+        kv = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", line)
+        if kv:
+            key, val = kv.group(1).lower(), kv.group(2).strip()
+            out[key] = val.strip('"').strip("'") if val not in ("|", ">", ">-", "|-") else ""
+        elif key and line.startswith((" ", "\t")):
+            out[key] = (out.get(key, "") + " " + line.strip()).strip()
+    return out
+
+
+def skill_meta(full, branch, paths, pushed_at):
+    hit = _skills_cache.get(full)
+    if hit and hit.get("pushed_at") == pushed_at and hit.get("paths") == paths[:40]:
+        return hit["skills"]
+    skills = []
+    for p in paths[:40]:
+        rel = "SKILL.md" if p == "." else f"{p}/SKILL.md"
+        try:
+            r = RAW.get(f"https://raw.githubusercontent.com/{full}/{branch}/{rel}", timeout=20)
+            fm = frontmatter(r.text[:8000]) if r.ok else {}
+        except requests.RequestException:
+            fm = {}
+        skills.append({"path": p, "name": (fm.get("name") or os.path.basename(p.rstrip("/")) or full.split("/")[1])[:80],
+                       "description": (fm.get("description") or "")[:300]})
+    _skills_cache[full] = {"pushed_at": pushed_at, "paths": paths[:40], "skills": skills}
+    return skills
 
 
 def root_file(full, name):
@@ -220,12 +273,23 @@ def text_blob(repo, rd):
     return " ".join([repo.get("name", ""), repo.get("description") or "", " ".join(repo.get("topics") or []), rd]).lower()
 
 
+GENERIC = ("Agen & Orkestrasi", "Riset & AI")
+
+
 def categorize(repo):
-    blob = " ".join([repo.get("name", ""), repo.get("description") or "", " ".join(repo.get("topics") or [])]).lower()
+    """Specific categories win when they have any keyword hit; generic ones are only the fallback.
+    Name and topics weigh more than the description."""
+    name = repo.get("name", "").lower().replace("-", " ").replace("_", " ")
+    topics = " ".join(t.replace("-", " ") for t in (repo.get("topics") or [])).lower()
+    desc = (repo.get("description") or "").lower()
+    scores = {}
     for cat, pat in CATEGORIES:
-        if re.search(pat, blob):
-            return cat
-    return "Lainnya"
+        scores[cat] = 3 * len(re.findall(pat, name)) + 2 * len(re.findall(pat, topics)) + len(re.findall(pat, desc))
+    specific = {c: v for c, v in scores.items() if c not in GENERIC and v > 0}
+    if specific:
+        return max(specific, key=specific.get)
+    generic = {c: scores[c] for c in GENERIC if scores.get(c, 0) > 0}
+    return max(generic, key=generic.get) if generic else "Lainnya"
 
 
 def risks_for(repo, rd, env_vars):
@@ -323,11 +387,11 @@ def app_install(repo, hint):
     if not hint:
         return []
     if hint["type"] == "npm":
-        return [{"client": "Terminal (npm)", "lang": "bash", "snippet": f"npm install -g {hint['name']}"}]
+        return [{"client": "Terminal (npm)", "lang": "bash", "snippet": f"npm install -g --prefix ~/.local {hint['name']}"}]
     return [{"client": "Terminal (pipx)", "lang": "bash", "snippet": f"pipx install {hint['name']}"}]
 
 
-AGENT_RE = re.compile(r"agent|claude|codex|\bmcp\b|\bllm\b|\bai\b|copilot|cursor|gemini|prompt|skill")
+AGENT_RE = re.compile(r"agent|claude|codex|\bmcp\b|model context protocol|context protocol|\bllm\b|\bai\b|copilot|cursor|gemini|prompt|skill|openai|anthropic|chatgpt")
 
 
 SEARCH_TOPICS = {"claude-code", "codex-cli", "claude-skills", "agent-skills", "claude-skill", "skills", "claude"}
@@ -369,6 +433,7 @@ def enrich(cand):
         hint = package_hint(full)
     if kind == "app":
         hint = package_hint(full)
+    skills = skill_meta(full, repo.get("default_branch") or "HEAD", paths, repo.get("pushed_at")) if kind == "skill" else []
     if kind == "mcp":
         install, env = mcp_install(repo, reg, hint)
     elif kind == "skill":
@@ -377,8 +442,20 @@ def enrich(cand):
         install, env = app_install(repo, hint), []
     return {
         "repo": repo, "kind": kind, "reg": reg, "install": install, "env": env,
-        "risks": risks_for(repo, rd, env), "paths": paths,
+        "risks": risks_for(repo, rd, env), "paths": paths, "skills": skills,
     }
+
+
+def text_hash(text):
+    import hashlib
+    return hashlib.sha1((text or "").strip().encode()).hexdigest()
+
+
+def translated(con, text):
+    if not text:
+        return None
+    row = con.execute("SELECT text FROM translations WHERE src_hash=? AND lang='id'", (text_hash(text),)).fetchone()
+    return row["text"] if row else None
 
 
 def progress(con, step, label, done=None, total=None, running=True):
@@ -413,6 +490,9 @@ def run(con, t0):
         print(f"  {len(found):4d}  {q}", flush=True)
         for repo in found:
             if repo.get("fork") or repo.get("stargazers_count", 0) < MIN_STARS or is_noise(repo):
+                continue
+            # text searches are noisy: keep only repos that are clearly about agents/MCP/skills
+            if not q.startswith("topic:") and not is_agent_related(repo):
                 continue
             key = repo["full_name"].lower()
             kind = guess_kind(hint_kind, repo, None)
@@ -479,8 +559,9 @@ def run(con, t0):
         con.execute(
             """INSERT OR REPLACE INTO items(id, kind, name, full_name, url, description, topics, language, license,
                stars, forks, open_issues, created_at, pushed_at, archived, homepage, category, install, env_vars, risks,
-               skill_paths, registry_name, stars_7d, momentum, momentum_basis, sources, first_seen, updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               skill_paths, registry_name, stars_7d, momentum, momentum_basis, sources, first_seen, updated_at,
+               skills, default_branch, description_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (key, r["kind"], repo["name"], repo["full_name"], repo["html_url"], repo.get("description"),
              json.dumps(repo.get("topics") or []), repo.get("language"),
              (repo.get("license") or {}).get("spdx_id") if repo.get("license") else None,
@@ -488,7 +569,8 @@ def run(con, t0):
              int(bool(repo.get("archived"))), repo.get("homepage"), categorize(repo), json.dumps(r["install"]),
              json.dumps(r["env"]), json.dumps(r["risks"]), json.dumps(r["paths"]),
              (r["reg"] or {}).get("name"), s7, round(momentum, 2), basis, json.dumps(r["sources"]),
-             first["first_seen"] if first else now, now))
+             first["first_seen"] if first else now, now,
+             json.dumps(r["skills"]), repo.get("default_branch"), translated(con, repo.get("description"))))
     # drop items that disappeared from every source for 30 days
     con.execute("DELETE FROM items WHERE updated_at < ?", ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat(),))
     counts = {k: v for k, v in con.execute("SELECT kind, COUNT(*) FROM items GROUP BY kind")}

@@ -16,7 +16,7 @@ from urllib.parse import parse_qs  # noqa: E402
 WEB = os.path.join(ROOT, "web")
 HOST = os.environ.get("KATALOG_HOST", "127.0.0.1")
 PORT = int(os.environ.get("KATALOG_PORT", "8787"))
-JSON_FIELDS = ("topics", "install", "env_vars", "risks", "skill_paths", "sources")
+JSON_FIELDS = ("topics", "install", "env_vars", "risks", "skill_paths", "sources", "skills")
 
 try:
     import installer  # Tahap 2: sends install requests to the OpenBot webhook
@@ -92,6 +92,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def via_tailnet(self):
+        """True when the request came through `tailscale serve` from a tailnet device (not Funnel)."""
+        if self.headers.get("Tailscale-Funnel-Request"):
+            return False
+        if self.headers.get("Tailscale-User-Login"):
+            return True
+        # direct local access (no proxy) is also trusted
+        return not self.headers.get("X-Forwarded-For") and self.client_address[0] in ("127.0.0.1", "::1")
+
     def authed(self):
         return auth.valid_session(self.headers.get("Cookie", ""))
 
@@ -107,6 +116,10 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/"):
                 return self.send_json(401, {"error": "perlu login"})
             return self.redirect("/login")
+        if path == "/api/whoami":
+            return self.send_json(200, {"tailnet": self.via_tailnet(),
+                                        "login": self.headers.get("Tailscale-User-Login"),
+                                        "funnel": bool(self.headers.get("Tailscale-Funnel-Request"))})
         if path == "/api/status":
             con = db.connect()
             res = {"progress": load_progress(con), "last_run": db.get_meta(con, "last_run")}
@@ -114,6 +127,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, res)
         if path == "/api/items":
             items, meta = load_items()
+            meta["actions_allowed"] = meta["install_enabled"] and self.via_tailnet()
             return self.send_json(200, {"items": items, "meta": meta})
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.abspath(os.path.join(WEB, rel))
@@ -129,19 +143,22 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/login":
             ip = self.client_ip()
-            wait = max(auth.locked(ip), auth.locked("*"))
+            tailnet = self.via_tailnet()
+            wait = max(auth.locked(ip), 0 if tailnet else auth.locked("*"))
             if wait:
                 return self.send_body(429, auth.login_page(f"Terlalu banyak percobaan. Coba lagi {wait // 60 + 1} menit lagi."), "text/html; charset=utf-8")
             length = min(int(self.headers.get("Content-Length") or 0), 2000)
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             given = (form.get("password") or [""])[0]
-            if auth.check_password(ip, given):
+            if auth.check_password(ip, given, count_global=not tailnet):
                 return self.redirect("/", auth.make_cookie())
             return self.send_body(401, auth.login_page("Password salah."), "text/html; charset=utf-8")
         if not self.authed():
             return self.send_json(401, {"error": "perlu login"})
         if path != "/api/install":
             return self.send_json(404, {"error": "not found"})
+        if not self.via_tailnet():
+            return self.send_json(403, {"error": "Aksi hanya bisa dari perangkat Tailscale. Akses publik hanya untuk melihat."})
         if not installer or not installer.enabled():
             return self.send_json(503, {"error": "Tombol pasang belum aktif"})
         length = int(self.headers.get("Content-Length") or 0)

@@ -82,13 +82,14 @@ def locked(ip: str) -> int:
     return 0
 
 
-def check_password(ip: str, given: str) -> bool:
+def check_password(ip: str, given: str, count_global: bool = True) -> bool:
     ok = enabled() and hmac.compare_digest(given.encode(), _password().encode())
     with _lock:
         if ok:
             _fails.pop(ip, None)
             return True
-        for key, limit in ((ip, MAX_FAILS), ("*", GLOBAL_MAX_FAILS)):
+        keys = ((ip, MAX_FAILS), ("*", GLOBAL_MAX_FAILS)) if count_global else ((ip, MAX_FAILS),)
+        for key, limit in keys:
             rec = _fails.setdefault(key, [0, time.time(), 0])
             if time.time() - rec[1] > LOCK_SECONDS:
                 rec[:] = [0, time.time(), 0]

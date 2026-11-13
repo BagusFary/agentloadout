@@ -45,6 +45,13 @@ async function copy(text) {
   toast("Tersalin");
 }
 
+function hasUpdate(it) {
+  const st = it.install_state;
+  return !!(st && st.status === "installed" && st.latest_version && st.installed_version && st.latest_version !== st.installed_version);
+}
+function isOff(it) { return isInstalled(it) && it.install_state.enabled === 0; }
+function shortVer(v) { return v && /^[0-9a-f]{7,40}$/.test(v) ? v.slice(0, 7) : v; }
+
 function hasHigh(it) { return (it.risks || []).some((r) => r.level === "high"); }
 function isInstalled(it) { return it.install_state && it.install_state.status === "installed"; }
 
@@ -58,7 +65,7 @@ function filtered() {
     (!fi || (it.install || []).length) &&
     (!fs || !hasHigh(it)) &&
     (!fd || isInstalled(it)) &&
-    (!q || [it.name, it.full_name, it.description, (it.topics || []).join(" ")].join(" ").toLowerCase().includes(q))
+    (!q || [it.name, it.full_name, it.description, it.description_id, (it.topics || []).join(" "), (it.skills || []).map((k) => k.name).join(" ")].join(" ").toLowerCase().includes(q))
   );
   const s = $("#sort").value;
   const key = {
@@ -72,6 +79,8 @@ function filtered() {
 
 function stateBadge(it) {
   const st = it.install_state && it.install_state.status;
+  if (st === "installed" && hasUpdate(it)) return '<span class="state wait">Update tersedia</span>';
+  if (st === "installed" && isOff(it)) return '<span class="state bad">Mati</span>';
   if (st === "installed") return '<span class="state ok">Terpasang</span>';
   if (st === "requested") return '<span class="state wait">Diminta</span>';
   if (st === "review") return '<span class="state wait">Diperiksa</span>';
@@ -87,7 +96,7 @@ function card(it) {
   return `<article class="card" data-id="${esc(it.id)}">
     <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span><span>·</span><span class="owner">${esc(it.full_name.split("/")[0])} · ${esc(it.category)}</span>${stateBadge(it)}</div>
     <h3>${esc(it.name)}</h3>
-    <p class="desc">${esc(it.description || "Tanpa deskripsi")}</p>
+    <p class="desc">${esc(it.description_id || it.description || "Tanpa deskripsi")}</p>
     <div class="stats"><span>★ ${fmt(it.stars)}</span><span class="hot">↑ ${momentumText(it)}</span><span>${ago(it.pushed_at)}</span>${(it.install || []).length ? "<span>Siap pasang</span>" : ""}</div>
     ${risks ? `<div class="tags">${risks}</div>` : ""}
   </article>`;
@@ -104,6 +113,38 @@ function render(animate = true) {
   if (animate) stagger(grid.children, 0);
   $("#sentinel").hidden = lastList.length <= PAGE;
   $("#summary").textContent = `${lastList.length} hasil`;
+  renderFresh();
+}
+
+function freshRows() {
+  const q = $("#q").value.trim(), cat = $("#cat").value;
+  const filtersOn = q || cat || $("#f-install").checked || $("#f-safe").checked || $("#f-installed").checked;
+  const pool = state.items.filter((it) => state.kind === "all" || it.kind === state.kind);
+  if (filtersOn || !pool.length) return [];
+  const DAY = 86400000, now = Date.now();
+  const rows = [];
+  const rising = pool.filter((it) => it.momentum_basis === "7d" && it.stars_7d > 0)
+    .sort((a, b) => b.stars_7d - a.stars_7d).slice(0, 12);
+  if (rising.length) rows.push(["Naik minggu ini", "bintang bertambah paling banyak 7 hari terakhir", rising]);
+  const fresh = pool.filter((it) => now - Date.parse(it.created_at) < 21 * DAY)
+    .sort((a, b) => b.momentum - a.momentum).slice(0, 12);
+  if (fresh.length) rows.push(["Baru minggu ini", "repo baru yang langsung ramai", fresh]);
+  return rows;
+}
+
+function renderFresh() {
+  const box = $("#fresh");
+  const rows = freshRows();
+  box.hidden = !rows.length;
+  box.innerHTML = rows.map(([title, sub, list]) => `
+    <div class="fresh-head"><h2>${title}</h2><span>${sub}</span></div>
+    <div class="rail">${list.map((it) => `
+      <article class="mini-card" data-id="${esc(it.id)}">
+        <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span></div>
+        <h3>${esc(it.name)}</h3>
+        <p>${esc(it.description_id || it.description || "")}</p>
+        <div class="stats"><span>★ ${fmt(it.stars)}</span><span class="hot">↑ ${it.momentum_basis === "7d" && it.stars_7d != null ? "+" + fmt(it.stars_7d) : momentumText(it)}</span><span>${ago(it.created_at)}</span></div>
+      </article>`).join("")}</div>`).join("");
 }
 
 function appendMore() {
@@ -162,25 +203,47 @@ function openDetail(id) {
     <div class="snip"><header><span>${esc(s.client)}</span><button data-copy="${i}">Salin</button></header><pre>${esc(s.snippet)}</pre></div>`).join("");
   const risks = (it.risks || []).map((r) => `<li><span class="dot ${r.level}"></span><span>${esc(r.label)} <span class="note">· ${LEVEL[r.level] || r.level}</span></span></li>`).join("");
   const env = (it.env_vars || []).map((e) => `<li><span><code>${esc(e.name)}</code>${e.secret ? " · rahasia" : ""}<br><span class="note">${esc(e.description)}</span></span></li>`).join("");
-  const paths = (it.skill_paths || []).slice(0, 30).map((p) => `<li><code>${esc(p)}</code></li>`).join("");
-  const canInstall = state.meta.install_enabled;
+  const canAct = !!state.meta.actions_allowed;
+  const st = it.install_state || {};
+  const installed = isInstalled(it);
+  const skillList = (it.skills && it.skills.length ? it.skills : (it.skill_paths || []).map((p) => ({ path: p })));
+  const multi = it.kind === "skill" && skillList.length > 1;
+  const paths = multi ? skillList.slice(0, 40).map((sk, i) => `<li class="skill-row">
+      <span class="sk-txt"><b>${esc(sk.name || sk.path.split("/").pop())}</b>${sk.description ? `<span class="note">${esc(sk.description)}</span>` : ""}<code>${esc(sk.path)}</code></span>
+      ${!installed && canAct ? `<button class="mini" data-skill="${i}">Pasang</button>` : ""}
+    </li>`).join("") : "";
+  let actions;
+  if (installed) {
+    const ver = st.installed_version ? `<p class="ver">Versi terpasang <b>${esc(shortVer(st.installed_version))}</b>${hasUpdate(it) ? ` · <span class="upd">terbaru ${esc(shortVer(st.latest_version))}</span>` : st.latest_version ? " · sudah terbaru" : ""}</p>` : "";
+    const isMcp = /^(mcp|skill):/.test(st.ref || "");
+    actions = `${ver}<div class="actions three">
+      ${hasUpdate(it) ? `<button class="btn primary" id="b-update" ${canAct ? "" : "disabled"}>Update</button>` : ""}
+      ${isMcp ? `<button class="btn tinted" id="b-toggle" ${canAct ? "" : "disabled"}>${isOff(it) ? "Nyalakan" : "Matikan"}</button>` : ""}
+      <button class="btn danger" id="b-remove" ${canAct ? "" : "disabled"}>Lepas</button>
+    </div>`;
+  } else {
+    actions = `<div class="actions">
+      <button class="btn tinted" id="b-noah">Salin untuk Noah</button>
+      <button class="btn primary" id="b-install" ${canAct ? "" : "disabled"}>${multi ? "Pasang semua" : "Pasang ke OpenBot"}</button>
+    </div>`;
+  }
+  const lockNote = !canAct ? `<p class="note lock">${state.meta.install_enabled ? "Pasang, Update, dan Lepas hanya bisa dari perangkat yang tersambung Tailscale. Dari internet publik, katalog hanya bisa dilihat." : "Tombol pasang belum aktif."}</p>` : "";
   $("#detail").innerHTML = `<div class="detail">
     <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span><span>·</span><span>${esc(it.category)}</span>${stateBadge(it)}</div>
     <h2>${esc(it.name)}</h2>
     <a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.full_name)} ↗</a>
-    <p class="lead">${esc(it.description || "")}</p>
+    <p class="lead">${esc(it.description_id || it.description || "")}</p>
+    ${it.description_id && it.description ? `<p class="note orig">Asli: ${esc(it.description)}</p>` : ""}
     <div class="stats"><span>★ ${fmt(it.stars)}</span><span class="hot">↑ ${momentumText(it)}${it.momentum_basis === "lifetime" ? " (rata-rata)" : ""}</span><span>${ago(it.pushed_at)}</span>${it.language ? `<span>${esc(it.language)}</span>` : ""}<span>${esc(it.license || "tanpa lisensi")}</span></div>
-    <div class="actions">
-      <button class="btn tinted" id="b-noah">Salin untuk Noah</button>
-      <button class="btn primary" id="b-install" ${canInstall ? "" : "disabled"}>${isInstalled(it) ? "Lepas" : "Pasang ke OpenBot"}</button>
-    </div>
-    ${it.install_state && it.install_state.detail ? `<p class="note">Status: ${esc(it.install_state.status)} · ${esc(it.install_state.detail)}</p>` : ""}
+    ${actions}
+    ${lockNote}
+    ${st.detail ? `<p class="note">Status: ${esc(st.status)} · ${esc(st.detail)}</p>` : ""}
     <div class="section"><h4>Risiko · label otomatis</h4>
       ${risks ? `<ul>${risks}</ul>` : '<p class="note">Tidak ada label otomatis. Tetap baca kode sebelum memasang.</p>'}</div>
     ${env ? `<div class="section"><h4>Variabel yang dibutuhkan</h4><ul>${env}</ul></div>` : ""}
     <div class="section"><h4>Cara pasang</h4>
       ${snippets || '<p class="note">Belum ada perintah otomatis. Lihat README repo.</p>'}</div>
-    ${paths ? `<div class="section"><h4>Folder skill · ${(it.skill_paths || []).length}</h4><ul>${paths}</ul></div>` : ""}
+    ${paths ? `<div class="section"><h4>Skill di repo ini · ${skillList.length}</h4><ul class="skills">${paths}</ul>${skillList.length > 40 ? `<p class="note">+${skillList.length - 40} skill lain di repo.</p>` : ""}</div>` : ""}
     ${(it.topics || []).length ? `<div class="section"><h4>Topik</h4><div class="topics">${it.topics.map((t) => `<span>${esc(t)}</span>`).join("")}</div></div>` : ""}
   </div>`;
   $("#detail").querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
@@ -188,9 +251,13 @@ function openDetail(id) {
     b.textContent = "Tersalin"; b.classList.add("done");
     setTimeout(() => { b.textContent = "Salin"; b.classList.remove("done"); }, 1400);
   }));
-  $("#b-noah").addEventListener("click", () => copy(noahPrompt(it)));
-  const bi = $("#b-install");
-  if (canInstall) bi.addEventListener("click", () => requestInstall(it, bi));
+  const on = (sel, fn) => { const b = $(sel); if (b && canAct) b.addEventListener("click", () => fn(b)); };
+  const bn = $("#b-noah"); if (bn) bn.addEventListener("click", () => copy(noahPrompt(it)));
+  on("#b-install", (b) => sendAction(it, "install", b));
+  on("#b-update", (b) => sendAction(it, "update", b));
+  on("#b-remove", (b) => sendAction(it, "remove", b));
+  on("#b-toggle", (b) => sendAction(it, isOff(it) ? "enable" : "disable", b));
+  $("#detail").querySelectorAll("[data-skill]").forEach((b) => b.addEventListener("click", () => sendAction(it, "install", b, skillList[+b.dataset.skill].path)));
   const sh = $("#sheet");
   sh.classList.remove("closing");
   sh.hidden = false;
@@ -198,17 +265,28 @@ function openDetail(id) {
   document.body.style.overflow = "hidden";
 }
 
-async function requestInstall(it, btn) {
-  const action = isInstalled(it) ? "remove" : "install";
-  const verb = action === "remove" ? "lepas" : "pasang";
-  if (!confirm(`Kirim permintaan ${verb} "${it.name}" ke Noah? Noah akan memeriksa dan meminta persetujuanmu di chat.`)) return;
-  busy(btn, true, "Mengirim…");
+const ACTION_TEXT = {
+  install: ["pasang", "Noah akan memeriksa repo lalu meminta persetujuanmu di chat."],
+  update: ["update", "Noah akan memeriksa perubahan versi baru lalu meminta persetujuanmu di chat."],
+  remove: ["lepas", "Noah akan menjelaskan apa yang dilepas lalu meminta persetujuanmu di chat."],
+  enable: ["nyalakan", "Langsung dinyalakan lagi untuk semua agen."],
+  disable: ["matikan", "Langsung dimatikan untuk semua agen (tidak dihapus, bisa dinyalakan lagi)."],
+};
+
+async function sendAction(it, action, btn, skillPath) {
+  const [verb, how] = ACTION_TEXT[action];
+  const target = skillPath ? `skill "${skillPath.split("/").pop()}" dari ${it.name}` : `"${it.name}"`;
+  if (!confirm(`${verb[0].toUpperCase() + verb.slice(1)} ${target}?\n\n${how}`)) return;
+  busy(btn, true, btn.classList.contains("mini") ? "" : "Mengirim…");
   try {
-    const r = await fetch("/api/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: it.id, action }) });
-    const j = await r.json();
+    const r = await fetch("/api/install", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: it.id, action, skill_path: skillPath || null }) });
+    const j = await r.json().catch(() => ({}));
     busy(btn, false);
-    toast(r.ok ? "Permintaan terkirim ke Noah" : "Gagal: " + (j.error || r.status));
-    if (r.ok) { it.install_state = { status: "requested" }; render(false); closeDetail(); }
+    if (!r.ok) return toast("Gagal: " + (j.error || r.status));
+    toast(action === "enable" || action === "disable" ? `Permintaan ${verb} terkirim` : "Permintaan terkirim ke Noah, cek chat");
+    if (action === "install") it.install_state = { status: "requested", detail: "install dikirim ke Noah" };
+    render(false); closeDetail();
   } catch (e) { busy(btn, false); toast("Gagal mengirim: " + e.message); }
 }
 
@@ -302,6 +380,7 @@ $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTime
 ["#cat", "#sort", "#f-install", "#f-safe", "#f-installed"].forEach((s) => $(s).addEventListener("change", () => render()));
 new IntersectionObserver((ents) => { if (ents.some((e) => e.isIntersecting)) appendMore(); }, { rootMargin: "600px" }).observe($("#sentinel"));
 $("#grid").addEventListener("click", (e) => { const c = e.target.closest(".card"); if (c) openDetail(c.dataset.id); });
+$("#fresh").addEventListener("click", (e) => { const c = e.target.closest(".mini-card"); if (c) openDetail(c.dataset.id); });
 const THEMES = ["auto", "light", "dark"];
 const THEME_ICON = {
   auto: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>',
