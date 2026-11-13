@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#05070d" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>Katalog Agen</title>
+<script>
+  (function () {
+    var t = localStorage.getItem("katalog-theme") || "auto";
+    document.documentElement.dataset.theme = t;
+  })();
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="bg" aria-hidden="true"><i></i><i></i><i></i></div>
+<div id="topbar" class="topbar" aria-hidden="true"><span></span></div>
+
+<header class="top glass">
+  <div class="bar">
+    <div class="title">
+      <h1>Katalog Agen</h1>
+      <p id="updated">Memuat…</p>
+    </div>
+    <button id="theme" class="icon-btn" aria-label="Ganti tema" title="Tema"></button>
+    <a href="/logout" class="icon-btn" aria-label="Keluar" title="Keluar">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+    </a>
+  </div>
+
+  <div id="sync" class="sync" hidden>
+    <span class="spin" aria-hidden="true"></span>
+    <div class="sync-txt"><b id="sync-label">Memperbarui dari GitHub</b><small id="sync-sub"></small></div>
+    <div class="sync-bar"><span id="sync-fill"></span></div>
+  </div>
+
+  <nav class="seg" id="tabs" role="tablist">
+    <span class="seg-ind" aria-hidden="true"></span>
+    <button data-kind="all" class="on">Semua <b id="c-all"></b></button>
+    <button data-kind="mcp">MCP <b id="c-mcp"></b></button>
+    <button data-kind="skill">Skill <b id="c-skill"></b></button>
+    <button data-kind="app">Aplikasi <b id="c-app"></b></button>
+  </nav>
+
+  <div class="search">
+    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <input id="q" type="search" placeholder="Cari" autocomplete="off">
+  </div>
+
+  <div class="filters">
+    <select id="cat" class="pill"><option value="">Semua kategori</option></select>
+    <select id="sort" class="pill">
+      <option value="momentum">Paling viral</option>
+      <option value="stars">Bintang terbanyak</option>
+      <option value="pushed">Baru diperbarui</option>
+      <option value="created">Repo terbaru</option>
+    </select>
+    <label class="pill check"><input type="checkbox" id="f-install"><span>Siap pasang</span></label>
+    <label class="pill check"><input type="checkbox" id="f-safe"><span>Tanpa risiko tinggi</span></label>
+    <label class="pill check"><input type="checkbox" id="f-installed"><span>Terpasang</span></label>
+  </div>
+</header>
+
+<main>
+  <p id="summary" class="summary"></p>
+  <section id="grid" class="grid"></section>
+  <div id="sentinel" class="sentinel" hidden><span class="spin"></span></div>
+</main>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-bg" data-close></div>
+  <article class="sheet-card glass" role="dialog" aria-modal="true">
+    <div class="grabber" data-close></div>
+    <button class="close" data-close aria-label="Tutup">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <div id="detail"></div>
+  </article>
+</div>
+
+<div id="toast" class="toast glass" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
