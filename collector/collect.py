@@ -472,6 +472,7 @@ def main():
     try:
         run(con, t0)
     except BaseException:
+        con.rollback()  # never keep a half-written save
         progress(con, 0, "Gagal memperbarui", running=False)
         raise
 

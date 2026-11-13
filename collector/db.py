@@ -79,8 +79,12 @@ MIGRATIONS = [
 
 def connect(path: str = DB_PATH) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path, timeout=30)
     con.row_factory = sqlite3.Row
+    # WAL: readers never block the writer, and a crash mid-write leaves the last committed state intact
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA busy_timeout=30000")
     con.executescript(SCHEMA)
     for table, col, typ in MIGRATIONS:
         cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}

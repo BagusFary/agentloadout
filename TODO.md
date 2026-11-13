@@ -3,7 +3,7 @@
 Urutan prioritas (disepakati 13 Nov 2026):
 
 1. [x] Ganti token GitHub dengan token tanpa scope (selesai 13 Nov 2026, scope kosong terverifikasi). Sisa: user menghapus token lama di github.com/settings/tokens.
-2. [~] Commit pertama ke Git + cadangan database (`data/katalog.db`). Kode sudah di-push ke github.com/BagusFary/agentloadout (privat, deploy key). Sisa: cadangan database harian.
+2. [x] Commit pertama ke Git + cadangan database. Kode di github.com/BagusFary/agentloadout (privat, deploy key). Cadangan: WAL + transaksi, `scripts/backup.py` (7 harian + 4 mingguan, sebelum tiap fetch), `scripts/restore.py`, uji pemulihan lulus (13 Nov). Opsional nanti: salinan ke luar laptop (PC via Tailscale / repo privat).
 9. [ ] Rapikan untuk rilis publik: pindahkan path/ID agen/alamat ke config (.env), README bahasa Inggris, LICENSE, fitur OpenBot opsional.
 3. [x] Sinkronisasi status "Terpasang" dengan MCP/skill yang benar-benar terpasang di OpenBot.
 4. [x] Tombol Update dan Nyala/Mati (contoh: MCP `rea`, 255 tool).

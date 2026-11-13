@@ -46,6 +46,21 @@ journalctl --user -u katalog-agen -n 50   # log web
 tailscale serve status                    # cek publikasi (10443 = tailnet only)
 ```
 
+## Cadangan & pemulihan
+- Setiap pembaruan harian (`scripts/update.sh`) **mencadangkan database dulu** sebelum fetch.
+  Kalau cadangan gagal, fetch dibatalkan.
+- Lokasi: `~/Backups/agentloadout/daily` (7 terakhir) dan `weekly` (4 terakhir), izin hanya pemilik.
+  Tiap cadangan = salinan SQLite yang sudah dicek `integrity_check` + `*.state.json.gz`
+  (riwayat bintang, status terpasang, terjemahan: data yang tidak bisa di-fetch ulang).
+- Database memakai WAL mode; kolektor menyimpan dalam satu transaksi dan membatalkan bila gagal.
+
+```bash
+python3 scripts/backup.py                       # cadangan manual sekarang
+python3 scripts/restore.py --list               # lihat cadangan
+python3 scripts/restore.py ~/Backups/agentloadout/daily/katalog-YYYY-MM-DD.db   # pulihkan
+```
+`restore.py` menghentikan web, menyimpan database lama sebagai `katalog.db.before-restore-*`, memulihkan, lalu menyalakan web lagi.
+
 ## Mematikan
 ```bash
 tailscale funnel --https=10000 off   # tutup akses publik
