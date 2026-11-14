@@ -1,70 +1,108 @@
-# Katalog Agen
+# Agent Loadout
 
-Katalog pribadi berisi server MCP, skill agen, dan aplikasi agen yang sedang naik daun di GitHub, lengkap dengan label risiko, contoh config, dan tombol **Pasang ke OpenBot**.
+**Discover, vet, and equip trending MCP servers, agent skills, and AI-agent apps — for any agent harness.**
 
-- **Alamat publik (perlu password):** https://9router.tail0b3182.ts.net:10000/  (Tailscale Funnel)
-- **Alamat tailnet (perlu password):** https://9router.tail0b3182.ts.net:10443/
-- **Lokal:** http://127.0.0.1:8787/
+Agent Loadout is a local MCP server, CLI, and web catalog. It tracks what is trending on GitHub and the
+official MCP registry, labels the risks, and installs MCP servers and skills into the harnesses you use:
+**Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode, and OpenBot** — only after you approve.
 
-## Login
-- Semua halaman dan API wajib login dengan password yang disimpan lewat formulir aman OpenBot (`KATALOG_WEB_PASSWORD`). Sesi berlaku 30 hari; tombol **Keluar** di pojok kanan atas.
-- 5 kali salah dari satu IP mengunci IP itu 15 menit; 30 kali salah total mengunci semua login 15 menit.
-- Ganti password: minta Noah membuka formulir `KATALOG_WEB_PASSWORD` lagi, lalu `systemctl --user restart katalog-agen`. Semua sesi lama otomatis keluar.
+## Install (once)
 
-## Cara pakai
-1. Pilih tab **MCP / Skill / Aplikasi**, cari, filter kategori, atau urutkan (Paling viral, Bintang, Baru diperbarui, Repo terbaru).
-2. Klik kartu untuk detail: risiko, variabel yang dibutuhkan, dan config siap salin (Claude Code, Codex, JSON).
-3. **Pasang ke OpenBot:** tombol mengirim permintaan bertanda tangan ke Noah. Noah memeriksa repo, mengirim ringkasan risiko ke chat, dan baru memasang setelah kamu membalas `setuju pasang <owner/repo>`.
-   - MCP dipasang ke server OpenBot, sehingga semua agen mendapat tool-nya.
-   - Skill dijadikan skill lokal lalu dipasang ke semua agen.
-4. Alternatif tanpa webhook: **Salin perintah untuk Noah**, lalu tempel ke chat.
-5. Item yang terpasang bisa dilepas dengan tombol **Lepas dari OpenBot**.
+```bash
+uvx agentloadout setup
+```
 
-"Paling viral" memakai kenaikan bintang 7 hari. Selama riwayat belum 7 hari, dipakai rata-rata bintang per hari sejak repo dibuat (ditandai "rata-rata sejak dibuat").
+`setup` detects your harnesses, registers the `agentloadout` MCP server in the ones you pick, installs a
+short guide skill so agents know the safe workflow, and optionally stores a GitHub token (no scopes
+needed; it raises the API limit from 60 to 5,000 requests per hour). Restart your harness afterwards.
 
-Label risiko dibuat otomatis dari deskripsi, topik, dan README. Ini hanya penanda awal, bukan audit keamanan.
+The catalog is fetched the first time an agent uses it (about 5 minutes) and refreshed automatically
+when it is older than 24 hours. There is no background service to manage.
 
-## Komponen
-| Bagian | Lokasi |
+To remove everything: `uvx agentloadout uninstall`.
+
+## Use it from your agent
+
+> "Find an MCP server for Postgres in Agent Loadout and install it to Claude Code and Codex."
+
+The agent will search, inspect the repo, and create a **plan**. You approve the plan in the local web
+UI or in your own terminal, then the agent applies it.
+
+| MCP tool | What it does |
 |---|---|
-| Kolektor data GitHub + registry MCP | `collector/collect.py` |
-| Database | `data/katalog.db` (SQLite) |
-| Backend web + API | `server/app.py` (127.0.0.1:8787) |
-| Pengirim webhook | `server/installer.py`, URL di `data/webhook.json` |
-| Tampilan | `web/` |
-| Catat status pasang | `scripts/set_status.py <owner/repo> <status> "<detail>"` |
-| Pembaruan data | `scripts/update.sh` (routine OpenBot harian 06:00 WIB) |
+| `search_catalog` | Search MCP servers, skills, and apps (trending, stars, newest) |
+| `get_item` | Details, install configs, env vars, skills inside a repo |
+| `inspect_repo` | Clone without running and flag risky patterns |
+| `list_harnesses` | Harnesses detected on this computer |
+| `plan_install` / `plan_remove` | Create a plan — changes nothing yet |
+| `plan_status` / `apply_plan` | Apply a plan **after a human approved it** |
+| `list_installed` | What is installed where |
+| `open_dashboard` | Start the local web UI and return its address |
 
-Token GitHub dan kunci webhook disimpan oleh OpenBot di `~/.config/OpenBot/agent-api-keys/…`, tidak di proyek ini.
-
-## Perintah berguna
-```bash
-systemctl --user status katalog-agen      # status web
-systemctl --user restart katalog-agen     # restart web
-journalctl --user -u katalog-agen -n 50   # log web
-~/Projects/katalog-agen/scripts/update.sh # perbarui data sekarang (±5 menit)
-tailscale serve status                    # cek publikasi (10443 = tailnet only)
-```
-
-## Cadangan & pemulihan
-- Setiap pembaruan harian (`scripts/update.sh`) **mencadangkan database dulu** sebelum fetch.
-  Kalau cadangan gagal, fetch dibatalkan.
-- Lokasi: `~/Backups/agentloadout/daily` (7 terakhir) dan `weekly` (4 terakhir), izin hanya pemilik.
-  Tiap cadangan = salinan SQLite yang sudah dicek `integrity_check` + `*.state.json.gz`
-  (riwayat bintang, status terpasang, terjemahan: data yang tidak bisa di-fetch ulang).
-- Database memakai WAL mode; kolektor menyimpan dalam satu transaksi dan membatalkan bila gagal.
+## Use it yourself
 
 ```bash
-python3 scripts/backup.py                       # cadangan manual sekarang
-python3 scripts/restore.py --list               # lihat cadangan
-python3 scripts/restore.py ~/Backups/agentloadout/daily/katalog-YYYY-MM-DD.db   # pulihkan
+agentloadout ui            # local web catalog at http://127.0.0.1:8787
+agentloadout plans         # plans waiting for approval
+agentloadout approve <id>  # approve (interactive terminal only)
+agentloadout harnesses     # detected harnesses and config paths
+agentloadout where         # data, config and backup folders
 ```
-`restore.py` menghentikan web, menyimpan database lama sebagai `katalog.db.before-restore-*`, memulihkan, lalu menyalakan web lagi.
 
-## Mematikan
-```bash
-tailscale funnel --https=10000 off   # tutup akses publik
-tailscale serve --https=10443 off
-systemctl --user disable --now katalog-agen
+## Supported harnesses
+
+| Harness | MCP servers | Skills |
+|---|---|---|
+| Claude Code | `claude mcp add-json --scope user` | `~/.claude/skills/` |
+| Codex CLI | `codex mcp add` (or `~/.codex/config.toml`) | `~/.agents/skills/` |
+| Cursor | `~/.cursor/mcp.json` | `~/.agents/skills/` |
+| Gemini CLI | `gemini mcp add -s user` (or `~/.gemini/settings.json`) | `~/.agents/skills/` |
+| OpenCode | `opencode mcp add --global` (or `opencode.json`) | `~/.agents/skills/` |
+| OpenBot | via an OpenBot agent (`openbot.*` tools) | via an OpenBot agent |
+
+Every config file is backed up before it changes; removing an item restores it.
+
+## Safety model
+
+- **Agents propose, humans approve.** `apply_plan` refuses plans that are not approved, older than one
+  hour, or modified after approval. Approval happens in the web UI or with `agentloadout approve` in an
+  interactive terminal — not through the MCP connection.
+- **Inspect before install.** `inspect_repo` clones repositories into a scratch folder and never runs
+  them. It flags download-and-run commands, install scripts, credential access, obfuscation, and prompt
+  injection text. It is pattern-based evidence, not a guarantee.
+- **Pinned versions.** npm and PyPI packages are pinned to the version that was reviewed.
+- **No placeholder secrets.** Missing API keys are reported, never written as dummy values.
+- **Local web UI.** Binds to `127.0.0.1`, rejects cross-site requests, and checks the Host header.
+- **Limits.** An agent with unrestricted shell access can bypass any local control by editing files
+  directly. Keep your harness' own command approval prompts turned on.
+
+## Configuration
+
+`agentloadout where` shows the data folder (Linux `~/.local/share/agentloadout`, macOS
+`~/Library/Application Support/agentloadout`, Windows `%APPDATA%\agentloadout`). Optional
+`config.toml` there:
+
+```toml
+[github]
+token_file = "~/.config/secrets/github_token"   # or env GITHUB_TOKEN
+
+[web]
+host = "127.0.0.1"
+port = 8787
+password_file = ""          # required if you expose the UI beyond localhost
+idle_shutdown_minutes = 30  # on-demand UI stops when idle
+
+[catalog]
+refresh_hours = 24
 ```
-Lalu nonaktifkan routine "Perbarui Katalog Agen harian" dan webhook "Permintaan pasang dari Katalog Agen" di OpenBot.
+
+## Development
+
+```bash
+uv run agentloadout ui
+uv run python tests/e2e_mcp.py ~/.local/share/agentloadout/catalog.db
+```
+
+## License
+
+MIT

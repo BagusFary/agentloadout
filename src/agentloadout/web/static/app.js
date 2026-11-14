@@ -3,6 +3,15 @@ const $ = (s) => document.querySelector(s);
 const state = { items: [], meta: {}, kind: "all", shown: 60 };
 const KIND_LABEL = { mcp: "MCP", skill: "Skill", app: "Aplikasi" };
 
+const API_HEADERS = { "Content-Type": "application/json", "X-Agentloadout": "1" };
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", headers: API_HEADERS, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+const HARNESS_NAME = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", openbot: "OpenBot", claude: "~/.claude/skills", agents: "~/.agents/skills" };
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n ?? 0));
 
@@ -210,24 +219,27 @@ function openDetail(id) {
   const multi = it.kind === "skill" && skillList.length > 1;
   const paths = multi ? skillList.slice(0, 40).map((sk, i) => `<li class="skill-row">
       <span class="sk-txt"><b>${esc(sk.name || sk.path.split("/").pop())}</b>${sk.description ? `<span class="note">${esc(sk.description)}</span>` : ""}<code>${esc(sk.path)}</code></span>
-      ${!installed && canAct ? `<button class="mini" data-skill="${i}">Pasang</button>` : ""}
+      ${canAct ? `<button class="mini" data-skill="${i}">Pasang</button>` : ""}
     </li>`).join("") : "";
   let actions;
-  if (installed) {
+  const tg = (it.targets || []);
+  const tgLine = tg.length ? `<p class="ver">Terpasang di: <b>${tg.map((h) => esc(HARNESS_NAME[h] || h)).join(", ")}</b></p>` : "";
+  if (installed && state.meta.openbot_webhook) {
     const ver = st.installed_version ? `<p class="ver">Versi terpasang <b>${esc(shortVer(st.installed_version))}</b>${hasUpdate(it) ? ` · <span class="upd">terbaru ${esc(shortVer(st.latest_version))}</span>` : st.latest_version ? " · sudah terbaru" : ""}</p>` : "";
     const isMcp = /^(mcp|skill):/.test(st.ref || "");
     actions = `${ver}<div class="actions three">
       ${hasUpdate(it) ? `<button class="btn primary" id="b-update" ${canAct ? "" : "disabled"}>Update</button>` : ""}
       ${isMcp ? `<button class="btn tinted" id="b-toggle" ${canAct ? "" : "disabled"}>${isOff(it) ? "Nyalakan" : "Matikan"}</button>` : ""}
-      <button class="btn danger" id="b-remove" ${canAct ? "" : "disabled"}>Lepas</button>
-    </div>`;
+      <button class="btn danger" id="b-remove" ${canAct ? "" : "disabled"}>Lepas (OpenBot)</button>
+    </div>${tgLine}`;
   } else {
-    actions = `<div class="actions">
-      <button class="btn tinted" id="b-noah">Salin untuk Noah</button>
-      <button class="btn primary" id="b-install" ${canAct ? "" : "disabled"}>${multi ? "Pasang semua" : "Pasang ke OpenBot"}</button>
-    </div>`;
+    actions = `${tgLine}<div class="actions">
+      <button class="btn tinted" id="b-noah">Salin untuk agen</button>
+      ${it.kind === "app" ? "" : `<button class="btn primary" id="b-install" ${canAct ? "" : "disabled"}>${multi ? "Pilih skill di bawah" : "Pasang…"}</button>`}
+    </div>
+    ${tg.length ? `<div class="actions"><button class="btn danger" id="b-unplug" ${canAct ? "" : "disabled"}>Lepas dari harness…</button></div>` : ""}`;
   }
-  const lockNote = !canAct ? `<p class="note lock">${state.meta.install_enabled ? "Pasang, Update, dan Lepas hanya bisa dari perangkat yang tersambung Tailscale. Dari internet publik, katalog hanya bisa dilihat." : "Tombol pasang belum aktif."}</p>` : "";
+  const lockNote = !canAct ? `<p class="note lock">Pasang dan Lepas hanya bisa dari komputer ini atau perangkat Tailscale. Dari internet publik, katalog hanya bisa dilihat.</p>` : "";
   $("#detail").innerHTML = `<div class="detail">
     <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span><span>·</span><span>${esc(it.category)}</span>${stateBadge(it)}</div>
     <h2>${esc(it.name)}</h2>
@@ -253,16 +265,100 @@ function openDetail(id) {
   }));
   const on = (sel, fn) => { const b = $(sel); if (b && canAct) b.addEventListener("click", () => fn(b)); };
   const bn = $("#b-noah"); if (bn) bn.addEventListener("click", () => copy(noahPrompt(it)));
-  on("#b-install", (b) => sendAction(it, "install", b));
+  on("#b-install", () => multi ? $(".skills")?.scrollIntoView({ behavior: "smooth" }) : openChooser(it, "install"));
+  on("#b-unplug", () => openChooser(it, "remove"));
   on("#b-update", (b) => sendAction(it, "update", b));
   on("#b-remove", (b) => sendAction(it, "remove", b));
   on("#b-toggle", (b) => sendAction(it, isOff(it) ? "enable" : "disable", b));
-  $("#detail").querySelectorAll("[data-skill]").forEach((b) => b.addEventListener("click", () => sendAction(it, "install", b, skillList[+b.dataset.skill].path)));
+  $("#detail").querySelectorAll("[data-skill]").forEach((b) => b.addEventListener("click", () => openChooser(it, "install", skillList[+b.dataset.skill].path)));
   const sh = $("#sheet");
   sh.classList.remove("closing");
   sh.hidden = false;
   sh.querySelector(".sheet-card").scrollTop = 0;
   document.body.style.overflow = "hidden";
+}
+
+// ---------------------------------------------------------------- multi-harness install (plans)
+async function loadHarnesses() {
+  try { state.harnesses = (await (await fetch("/api/harnesses")).json()).harnesses; } catch { state.harnesses = []; }
+}
+
+function openChooser(it, action, skillPath) {
+  const det = (state.harnesses || []).filter((h) => h.detected);
+  const installedOn = new Set(it.targets || []);
+  const pool = action === "remove" ? det.filter((h) => installedOn.has(h.id) || (it.kind === "skill" && ["claude-code", "codex", "cursor", "gemini", "opencode"].includes(h.id))) : det;
+  const title = action === "remove" ? "Lepas dari mana?" : "Pasang ke mana?";
+  const what = skillPath ? `skill <b>${esc(skillPath.split("/").pop())}</b>` : `<b>${esc(it.name)}</b>`;
+  $("#detail").insertAdjacentHTML("afterbegin", "");
+  const box = document.createElement("div");
+  box.className = "chooser";
+  box.innerHTML = `<h3>${title}</h3><p class="note">${action === "remove" ? "Lepas" : "Pasang"} ${what}. Harness yang terdeteksi di komputer ini:</p>
+    ${pool.length ? `<div class="hs">${pool.map((h) => `<label class="h-opt"><input type="checkbox" value="${h.id}" ${action === "remove" ? (installedOn.has(h.id) ? "checked" : "") : (h.id === "openbot" && !state.meta.openbot_webhook ? "" : "checked")}><span><b>${esc(h.name)}</b><small>${esc(h.config || "")}</small></span></label>`).join("")}</div>`
+      : '<p class="note lock">Tidak ada harness yang terdeteksi. Pasang Claude Code, Codex, Cursor, Gemini CLI, atau OpenCode dulu.</p>'}
+    <div class="actions"><button class="btn ghost" data-x>Batal</button><button class="btn primary" data-go ${pool.length ? "" : "disabled"}>Buat rencana</button></div>
+    <div class="plan-out"></div>`;
+  const d = $("#detail .detail");
+  d.prepend(box);
+  $(".sheet-card").scrollTop = 0;
+  box.querySelector("[data-x]").onclick = () => box.remove();
+  box.querySelector("[data-go]").onclick = async (ev) => {
+    const targets = [...box.querySelectorAll("input:checked")].map((x) => x.value);
+    if (!targets.length) return toast("Pilih minimal satu harness");
+    busy(ev.target, true, "Menyusun…");
+    try {
+      const p = await api("/api/plans", { item_id: it.id, targets, action, skill_path: skillPath || null });
+      busy(ev.target, false); ev.target.remove();
+      box.querySelector(".plan-out").innerHTML = planHtml(p);
+      wirePlan(box, p, it);
+    } catch (e) { busy(ev.target, false); toast("Gagal: " + e.message); }
+  };
+}
+
+function planHtml(p) {
+  const spec = p.spec ? (p.spec.url || `${p.spec.command} ${(p.spec.args || []).join(" ")}`) : "";
+  return `<div class="plan">
+    <div class="plan-h">Rencana <b>${esc(p.id)}</b> · ${esc(p.action === "install" ? "pasang" : "lepas")} ${esc(p.kind)}</div>
+    ${spec ? `<pre>${esc(spec)}</pre>` : ""}
+    ${p.skill ? `<p class="note">Folder skill: <code>${esc(p.skill.path)}</code> → <code>${esc(p.skill.slug)}</code></p>` : ""}
+    <ul class="changes">${p.changes.map((c) => `<li><b>${esc(HARNESS_NAME[c.harness] || c.harness)}</b><span>${esc(c.detail)}</span></li>`).join("")}</ul>
+    ${(p.warnings || []).map((w) => `<p class="note warn">⚠ ${esc(w)}</p>`).join("")}
+    ${(p.risks || []).length ? `<p class="note">Label risiko: ${p.risks.map(esc).join(", ")}</p>` : ""}
+    <p class="note">Config lama dicadangkan otomatis sebelum diubah.</p>
+    <div class="actions"><button class="btn ghost" data-reject>Tolak</button><button class="btn primary" data-approve>Setujui & ${p.action === "install" ? "pasang" : "lepas"}</button></div>
+    <div class="plan-res"></div></div>`;
+}
+
+function wirePlan(root, p, it) {
+  root.querySelector("[data-reject]").onclick = async () => { try { await api(`/api/plans/${p.id}/reject`); toast("Rencana ditolak"); root.remove?.(); refreshPlans(); } catch (e) { toast("Gagal: " + e.message); } };
+  root.querySelector("[data-approve]").onclick = async (ev) => {
+    busy(ev.target, true, "Memasang…");
+    try {
+      const r = await api(`/api/plans/${p.id}/approve`, { apply: true });
+      busy(ev.target, false);
+      root.querySelector(".plan-res").innerHTML = `<ul class="changes">${(r.results || []).map((x) => `<li><b>${x.ok === false ? "✗" : x.ok ? "✓" : "…"} ${esc(HARNESS_NAME[x.harness] || x.harness)}</b><span>${esc(x.error || x.result || (x.backup ? "selesai · cadangan dibuat" : "selesai"))}</span></li>`).join("")}</ul>${r.openbot ? `<p class="note">${esc(r.openbot)}</p>` : ""}`;
+      toast(r.status === "applied" ? "Selesai" : "Sebagian gagal, lihat rincian");
+      root.querySelectorAll("[data-approve],[data-reject]").forEach((b) => b.remove());
+      await load(true); refreshPlans();
+    } catch (e) { busy(ev.target, false); toast("Gagal: " + e.message); }
+  };
+}
+
+// pending plans created by agents
+async function refreshPlans() {
+  try {
+    const plans = (await (await fetch("/api/plans")).json()).plans || [];
+    state.pending = plans.filter((p) => p.status === "pending");
+    const b = $("#pending");
+    b.hidden = !state.pending.length;
+    b.querySelector("b").textContent = state.pending.length;
+  } catch { /* ignore */ }
+}
+
+function openPending() {
+  $("#detail").innerHTML = `<div class="detail"><h2>Menunggu persetujuan</h2><p class="lead">Rencana yang dibuat agen. Periksa sebelum menyetujui.</p>
+    ${(state.pending || []).map((p) => `<div class="pending-item" data-pid="${esc(p.id)}"><p class="ver"><b>${esc(p.item_name)}</b> · dibuat ${esc(p.created_by)} · ${esc(ago(p.created_at))}</p>${planHtml(p)}</div>`).join("") || "<p class='note'>Tidak ada.</p>"}</div>`;
+  document.querySelectorAll(".pending-item").forEach((el) => wirePlan(el, state.pending.find((p) => p.id === el.dataset.pid)));
+  const sh = $("#sheet"); sh.classList.remove("closing"); sh.hidden = false; document.body.style.overflow = "hidden";
 }
 
 const ACTION_TEXT = {
@@ -279,7 +375,7 @@ async function sendAction(it, action, btn, skillPath) {
   if (!confirm(`${verb[0].toUpperCase() + verb.slice(1)} ${target}?\n\n${how}`)) return;
   busy(btn, true, btn.classList.contains("mini") ? "" : "Mengirim…");
   try {
-    const r = await fetch("/api/install", { method: "POST", headers: { "Content-Type": "application/json" },
+    const r = await fetch("/api/install", { method: "POST", headers: API_HEADERS,
       body: JSON.stringify({ id: it.id, action, skill_path: skillPath || null }) });
     const j = await r.json().catch(() => ({}));
     busy(btn, false);
@@ -409,4 +505,7 @@ $("#theme").addEventListener("click", () => {
 
 $("#sheet").addEventListener("click", (e) => { if (e.target.hasAttribute("data-close")) closeDetail(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
+loadHarnesses();
+refreshPlans(); setInterval(() => { if (!document.hidden) refreshPlans(); }, 15000);
+$("#pending").addEventListener("click", openPending);
 load().catch((e) => { $("#updated").textContent = "Gagal memuat: " + e.message; $("#grid").innerHTML = '<p class="empty">Gagal memuat data. Coba muat ulang.</p>'; });

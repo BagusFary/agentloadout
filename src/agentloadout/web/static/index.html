@@ -8,7 +8,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
-<title>Katalog Agen</title>
+<title>Agent Loadout</title>
 <script>
   (function () {
     var t = localStorage.getItem("katalog-theme") || "auto";
@@ -24,7 +24,7 @@
 <header class="top glass">
   <div class="bar">
     <div class="title">
-      <h1>Katalog Agen</h1>
+      <h1>Agent Loadout</h1>
       <p id="updated">Memuat…</p>
     </div>
     <button id="theme" class="icon-btn" aria-label="Ganti tema" title="Tema"></button>
@@ -32,6 +32,8 @@
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
     </a>
   </div>
+
+  <button id="pending" class="pending" hidden><span class="dotp"></span><b>0</b> rencana menunggu persetujuanmu</button>
 
   <div id="sync" class="sync" hidden>
     <span class="spin" aria-hidden="true"></span>

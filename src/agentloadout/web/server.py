@@ -39,12 +39,17 @@ def load_items():
     con = db.connect()
     rows = con.execute("SELECT * FROM items ORDER BY stars DESC").fetchall()
     installs = {r["id"]: dict(r) for r in con.execute("SELECT * FROM installs")}
+    from .. import plans as _plans
+    targets = {}
+    for t in _plans.installed_targets():
+        targets.setdefault(t["item_id"], []).append(t["harness"])
     out = []
     for r in rows:
         d = dict(r)
         for f in JSON_FIELDS:
             d[f] = json.loads(d[f]) if d.get(f) else []
         d["install_state"] = installs.get(d["id"])
+        d["targets"] = targets.get(d["id"], [])
         out.append(d)
     meta = {"last_run": db.get_meta(con, "last_run"), "progress": load_progress(con),
             "install_enabled": bool(installer and installer.enabled())}
@@ -98,10 +103,63 @@ class Handler(BaseHTTPRequestHandler):
         # direct local access (no proxy) is also trusted
         return not self.headers.get("X-Forwarded-For") and self.client_address[0] in ("127.0.0.1", "::1")
 
+    def safe_origin(self):
+        """Block cross-site requests (CSRF) and DNS rebinding.
+        The web UI always sends X-Agentloadout; browsers cannot add it cross-origin without CORS."""
+        if self.headers.get("X-Agentloadout") != "1":
+            return False
+        if not auth.enabled():  # local mode without password: only accept local host names
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                return False
+        return True
+
+    def read_json(self, limit=20000):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > limit:
+            raise ValueError("terlalu besar")
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    def handle_plans(self, path):
+        from .. import plans
+        if not self.via_tailnet():
+            return self.send_json(403, {"error": "Aksi hanya bisa dari komputer ini atau perangkat Tailscale."})
+        try:
+            body = self.read_json()
+            parts = path.strip("/").split("/")  # api/plans[/<id>/<action>]
+            if len(parts) == 2:
+                p = plans.create(body.get("item_id", ""), list(body.get("targets") or []), body.get("action", "install"),
+                                 body.get("skill_path") or None, body.get("mcp_name") or None, created_by="web")
+                return self.send_json(201, p)
+            if len(parts) == 4 and parts[3] in ("approve", "reject"):
+                who = "web:" + (self.headers.get("Tailscale-User-Login") or self.client_ip())
+                if parts[3] == "reject":
+                    return self.send_json(200, plans.reject(parts[2], who))
+                p = plans.approve(parts[2], who)
+                if body.get("apply"):
+                    p = plans.apply(parts[2])
+                    p["openbot"] = self.forward_openbot(p)
+                return self.send_json(200, p)
+        except (ValueError, PermissionError) as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(404, {"error": "not found"})
+
+    def forward_openbot(self, p):
+        """OpenBot targets are installed by an OpenBot agent: hand them to the webhook if configured."""
+        if "openbot" not in p.get("targets", []):
+            return None
+        if not installer or not installer.enabled():
+            return "OpenBot: jalankan instruksi di rencana lewat agen OpenBot"
+        code, res = installer.request({"id": p["item_id"], "action": "install" if p["action"] == "install" else "remove",
+                                       "skill_path": (p.get("skill") or {}).get("path")})
+        return res.get("error") or "permintaan dikirim ke agen OpenBot"
+
     def authed(self):
         return auth.valid_session(self.headers.get("Cookie", ""))
 
     def do_GET(self):
+        import time as _t
+        LAST_REQUEST[0] = _t.time()
         path = urlparse(self.path).path
         if path == "/login":
             return self.send_body(200, auth.login_page(), "text/html; charset=utf-8")
@@ -122,9 +180,16 @@ class Handler(BaseHTTPRequestHandler):
             res = {"progress": load_progress(con), "last_run": db.get_meta(con, "last_run")}
             con.close()
             return self.send_json(200, res)
+        if path == "/api/harnesses":
+            from .. import harness
+            return self.send_json(200, {"harnesses": [h.info() for h in harness.ADAPTERS.values()]})
+        if path == "/api/plans":
+            from .. import plans
+            return self.send_json(200, {"plans": plans.list_plans()[:50]})
         if path == "/api/items":
             items, meta = load_items()
-            meta["actions_allowed"] = meta["install_enabled"] and self.via_tailnet()
+            meta["actions_allowed"] = self.via_tailnet()          # install/remove via plans (any harness)
+            meta["openbot_webhook"] = meta["install_enabled"]      # legacy OpenBot buttons need the webhook
             return self.send_json(200, {"items": items, "meta": meta})
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.abspath(os.path.join(WEB, rel))
@@ -152,6 +217,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_body(401, auth.login_page("Password salah."), "text/html; charset=utf-8")
         if not self.authed():
             return self.send_json(401, {"error": "perlu login"})
+        if path.startswith("/api/") and not self.safe_origin():
+            return self.send_json(403, {"error": "permintaan lintas situs ditolak"})
+        if path.startswith("/api/plans"):
+            return self.handle_plans(path)
         if path != "/api/install":
             return self.send_json(404, {"error": "not found"})
         if not self.via_tailnet():
@@ -169,11 +238,26 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(code, res)
 
 
-def main(host=None, port=None):
+LAST_REQUEST = [0.0]
+
+
+def main(host=None, port=None, on_demand=False):
+    import threading
+    import time
     w = config.web()
     host = host or w["host"]
     port = int(port or w["port"])
     srv = ThreadingHTTPServer((host, port), Handler)
+    LAST_REQUEST[0] = time.time()
+    idle = int(w.get("idle_shutdown_minutes") or 0) * 60
+    if on_demand and idle:
+        def watchdog():
+            while True:
+                time.sleep(30)
+                if time.time() - LAST_REQUEST[0] > idle:
+                    srv.shutdown()
+                    return
+        threading.Thread(target=watchdog, daemon=True).start()
     print(f"Agent Loadout di http://{host}:{port}", flush=True)
     srv.serve_forever()
 

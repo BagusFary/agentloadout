@@ -9,7 +9,7 @@ authors = [{ name = "BagusFary" }]
 keywords = ["mcp", "model-context-protocol", "ai-agents", "agent-skills", "claude-code", "codex", "cursor"]
 dependencies = [
     "requests>=2.31",
-    "mcp>=1.2",
+    "mcp>=2.3,<3",
 ]
 
 [project.scripts]

@@ -342,3 +342,28 @@ ul.skills li.skill-row { justify-content: space-between; align-items: center; ga
 .sk-txt .note { padding: 0 !important; margin: 0; line-height: 1.35; max-height: 2.7em; overflow: hidden;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .sk-txt code { margin-top: 2px; }
+
+/* multi-harness chooser & plans */
+.chooser { background: var(--card); border: 1px solid var(--card-line); border-radius: 18px; padding: 14px; margin: 6px 0 14px; animation: rise .35s var(--ease) both; }
+.chooser h3 { margin: 0 0 4px; font-size: 17px; }
+.hs { display: grid; gap: 8px; margin: 10px 0; }
+.h-opt { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 14px; background: var(--fill); cursor: pointer; }
+.h-opt input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+.h-opt span { display: flex; flex-direction: column; min-width: 0; }
+.h-opt small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.ghost { background: var(--fill); color: var(--ink); }
+.plan { margin-top: 10px; border-top: .5px solid var(--fill2); padding-top: 10px; }
+.plan-h { font-size: 14px; margin-bottom: 6px; }
+.plan pre { margin: 6px 0; padding: 10px 12px; background: var(--code); border-radius: 10px; font-size: 12.5px; overflow-x: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+ul.changes { list-style: none; padding: 0; margin: 6px 0; }
+ul.changes li { display: flex; flex-direction: column; padding: 7px 0; border-top: .5px solid var(--fill2); font-size: 13.5px; }
+ul.changes li:first-child { border-top: 0; }
+ul.changes li span { color: var(--muted); font-size: 12.5px; word-break: break-word; }
+.note.warn { color: var(--mid); }
+.pending { max-width: 1180px; width: 100%; margin: 10px auto 0; display: flex; align-items: center; gap: 8px; border: 0; cursor: pointer;
+  padding: 10px 14px; border-radius: 14px; font-size: 14px; font-weight: 600; text-align: left;
+  background: color-mix(in srgb, var(--mid) 16%, transparent); color: var(--mid); animation: drop .4s var(--ease); }
+.dotp { width: 9px; height: 9px; border-radius: 50%; background: var(--mid); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+.pending-item { border-top: .5px solid var(--fill2); margin-top: 12px; padding-top: 6px; }

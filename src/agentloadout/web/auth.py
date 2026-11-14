@@ -98,7 +98,7 @@ def check_password(ip: str, given: str, count_global: bool = True) -> bool:
 
 
 LOGIN_PAGE = """<!DOCTYPE html><html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Masuk – Katalog Agen</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Masuk – Agent Loadout</title>
 <script>document.documentElement.dataset.theme=localStorage.getItem("katalog-theme")||"auto";</script>
 <style>
 :root{--bg:#eef2f7;--ink:#0b0f19;--muted:#6e7480;--glass:rgba(255,255,255,.58);--line:rgba(255,255,255,.8);--fill:rgba(118,118,128,.12);--b1:#93c5fd;--b2:#c4b5fd;--b3:#99f6e4;--accent:#007aff;color-scheme:light}
@@ -117,7 +117,7 @@ button{width:100%;margin-top:10px;padding:13px;border:0;border-radius:13px;backg
 button:active{transform:scale(.98)}.err{color:#ff3b30;font-size:14px;margin:12px 0 0}
 </style></head><body><div class="bg"><i></i><i></i><i></i></div>
 <form method="post" action="/login"><div class="icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div>
-<h1>Katalog Agen</h1><p>Masukkan password untuk melanjutkan</p>
+<h1>Agent Loadout</h1><p>Masukkan password untuk melanjutkan</p>
 <input type="password" name="password" autocomplete="current-password" placeholder="Password" autofocus required>
 <button type="submit">Masuk</button>{error}</form></body></html>"""
 
