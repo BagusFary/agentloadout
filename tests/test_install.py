@@ -134,7 +134,8 @@ async def _mcp_session(spec, env):
             init = await s.initialize()
             h = await s.call_tool("list_harnesses", {})
             q = await s.call_tool("search_catalog", {"query": "postgres"})
-            return {"server": init.serverInfo.name, "harnesses": _data(h)["harnesses"], "search": _data(q)}
+            info = getattr(init, "server_info", None) or getattr(init, "serverInfo")
+            return {"server": info.name, "harnesses": _data(h)["harnesses"], "search": _data(q)}
 
 
 def _data(res):
