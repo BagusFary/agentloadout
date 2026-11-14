@@ -1,0 +1,26 @@
+[project]
+name = "agentloadout"
+version = "0.1.0"
+description = "Discover, vet, and equip trending MCP servers, agent skills, and AI-agent apps — for any agent harness."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "BagusFary" }]
+keywords = ["mcp", "model-context-protocol", "ai-agents", "agent-skills", "claude-code", "codex", "cursor"]
+dependencies = [
+    "requests>=2.31",
+    "mcp>=1.2",
+]
+
+[project.scripts]
+agentloadout = "agentloadout.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/BagusFary/agentloadout"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentloadout"]

@@ -7,19 +7,16 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(ROOT, "collector"))
-import db  # noqa: E402
-import auth  # noqa: E402
-from urllib.parse import parse_qs  # noqa: E402
+from urllib.parse import parse_qs
 
-WEB = os.path.join(ROOT, "web")
-HOST = os.environ.get("KATALOG_HOST", "127.0.0.1")
-PORT = int(os.environ.get("KATALOG_PORT", "8787"))
+from .. import config, db
+from . import auth
+
+WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 JSON_FIELDS = ("topics", "install", "env_vars", "risks", "skill_paths", "sources", "skills")
 
 try:
-    import installer  # Tahap 2: sends install requests to the OpenBot webhook
+    from ..integrations import openbot_webhook as installer  # optional approvals via an OpenBot agent
 except Exception:  # noqa: BLE001
     installer = None
 
@@ -172,9 +169,12 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(code, res)
 
 
-def main():
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"katalog-agen di http://{HOST}:{PORT}", flush=True)
+def main(host=None, port=None):
+    w = config.web()
+    host = host or w["host"]
+    port = int(port or w["port"])
+    srv = ThreadingHTTPServer((host, port), Handler)
+    print(f"Agent Loadout di http://{host}:{port}", flush=True)
     srv.serve_forever()
 
 

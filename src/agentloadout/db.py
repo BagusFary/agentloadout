@@ -3,9 +3,9 @@ import json
 import os
 import sqlite3
 
-DB_PATH = os.environ.get(
-    "KATALOG_DB", os.path.join(os.path.dirname(__file__), "..", "data", "katalog.db")
-)
+from . import paths
+
+DB_PATH = None  # resolved per call; kept for backwards compatibility
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -77,7 +77,8 @@ MIGRATIONS = [
 ]
 
 
-def connect(path: str = DB_PATH) -> sqlite3.Connection:
+def connect(path=None) -> sqlite3.Connection:
+    path = str(path or paths.db_path())
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     con = sqlite3.connect(path, timeout=30)
     con.row_factory = sqlite3.Row

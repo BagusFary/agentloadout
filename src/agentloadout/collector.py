@@ -12,8 +12,7 @@ import time
 
 import requests
 
-sys.path.insert(0, os.path.dirname(__file__))
-import db  # noqa: E402
+from . import config, db, paths  # noqa: E402
 
 GH = "https://api.github.com"
 REGISTRY = "https://registry.modelcontextprotocol.io/v0/servers"
@@ -25,10 +24,7 @@ LIMITS = {"mcp": 260, "skill": 160, "app": 120}
 
 
 def token() -> str:
-    path = os.environ.get("GITHUB_TOKEN_FILE")
-    if path and os.path.exists(path):
-        return open(path).read().strip()
-    return os.environ.get("GITHUB_TOKEN", "")
+    return config.github_token()
 
 
 S = requests.Session()
@@ -99,7 +95,7 @@ def queries():
 
 
 # --------------------------------------------------------------------------- registry
-CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "registry_cache.json")
+CACHE_PATH = str(paths.cache_file("registry_cache.json"))
 CACHE_DAYS = 7
 _cache = {}
 
@@ -168,7 +164,7 @@ def skill_paths(full, branch):
     return dirs[:200]
 
 
-SKILLS_CACHE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "skills_cache.json")
+SKILLS_CACHE_PATH = str(paths.cache_file("skills_cache.json"))
 _skills_cache = {}
 RAW = requests.Session()
 RAW.headers.update({"User-Agent": UA})

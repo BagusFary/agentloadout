@@ -10,12 +10,9 @@ import secrets
 import threading
 import time
 
-PASSWORD_FILE = os.environ.get(
-    "KATALOG_PASSWORD_FILE",
-    "/home/bagus/.config/OpenBot/agent-api-keys/agent-4b18fa4a-ba4c-4376-93c7-209e5bbc3d4a/KATALOG_WEB_PASSWORD",
-)
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SESSION_KEY_FILE = os.path.join(ROOT, "data", "session.key")
+from .. import config, paths
+
+SESSION_KEY_FILE = str(paths.home() / "session.key")
 COOKIE = "katalog_sesi"
 SESSION_DAYS = 30
 MAX_FAILS = 5
@@ -28,7 +25,7 @@ _fails = {}  # ip -> [count, first_fail_time, locked_until]
 
 def _password() -> str:
     try:
-        return open(PASSWORD_FILE).read().strip()
+        return config.read_secret(config.web()["password_file"])
     except OSError:
         return ""
 

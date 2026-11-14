@@ -1,7 +1,7 @@
 """Send signed install/remove requests from the catalog to Noah's OpenBot webhook routine.
 
-The webhook URL lives in data/webhook.json. The signing secret is read from a file outside the
-project (saved through OpenBot's secure key form); it is never sent to the browser or logged.
+Configure in config.toml under [integrations.openbot_webhook] (url, secret_file). The signing
+secret is read from a file; it is never sent to the browser or logged.
 """
 import calendar
 import hashlib
@@ -14,30 +14,16 @@ import uuid
 
 import requests
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(ROOT, "collector"))
-import db  # noqa: E402
-
-CONFIG = os.path.join(ROOT, "data", "webhook.json")
-SECRET_FILE = os.environ.get(
-    "KATALOG_WEBHOOK_SECRET_FILE",
-    "/home/bagus/.config/OpenBot/agent-api-keys/agent-4b18fa4a-ba4c-4376-93c7-209e5bbc3d4a/KATALOG_WEBHOOK_SECRET",
-)
+from .. import config, db
 EVENT_TYPE = "katalog.install"
 
 
 def _config():
-    try:
-        return json.load(open(CONFIG))
-    except (OSError, ValueError):
-        return {}
+    return config.openbot_webhook()
 
 
 def _secret():
-    try:
-        return open(SECRET_FILE).read().strip()
-    except OSError:
-        return ""
+    return config.read_secret(_config().get("secret_file", ""))
 
 
 def enabled() -> bool:
