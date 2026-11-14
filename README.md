@@ -52,7 +52,21 @@ Every install or removal plan needs this PIN to be approved, in the terminal or 
 > and never ask for the PIN. Create the plan and ask the user to approve it.
 
 **First catalog.** The catalog is fetched in the background the first time an agent uses it and refreshed
-when it is older than 24 hours. FIRST_CATALOG_NUMBERS
+when it is older than 24 hours.
+
+How long that takes:
+
+| | First run | Complete data |
+|---|---|---|
+| With a GitHub token | about 6 minutes (measured with v0.1.0: 374 s, 630 items) | after the first run |
+| Without a token | about 6 minutes (measured: 342 s, 630 items) | estimate: about 5 more hours of use |
+
+Without a token, GitHub allows 60 API requests per hour. READMEs and package files are then read from
+raw.githubusercontent.com, so every MCP server is complete after the first run (measured: 290 of 290).
+Finding the skills inside a repository needs the API, so in the measured run 281 skill and app repositories
+were saved as **not checked yet** (`checked: false` in `search_catalog`) instead of with empty data. While
+an agent keeps using the catalog, a new run starts when the last one is over an hour old and checks about
+60 more; the estimate above follows from that and was not measured. A token avoids the wait.
 
 **Uninstall:**
 
