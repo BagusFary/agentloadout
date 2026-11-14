@@ -49,6 +49,22 @@ def test_mcp_spec_refuses_bare_uvx_override(monkeypatch):
         cli.mcp_spec()
 
 
+@pytest.mark.parametrize("cmd", ["uv tool run agentloadout mcp", "uv x agentloadout mcp", "/usr/bin/uvx agentloadout mcp"])
+def test_mcp_spec_refuses_pypi_runner_override(monkeypatch, cmd):
+    from agentloadout import cli
+    monkeypatch.setenv("AGENTLOADOUT_MCP_COMMAND", cmd)
+    with pytest.raises(cli.SetupError):
+        cli.mcp_spec()
+
+
+def test_mcp_spec_override_is_shell_split(monkeypatch):
+    from agentloadout import cli
+    monkeypatch.setenv("AGENTLOADOUT_MCP_COMMAND", '"/opt/my tools/agentloadout" mcp')
+    assert cli.mcp_spec() == {"command": "/opt/my tools/agentloadout", "args": ["mcp"]}
+    monkeypatch.setenv("AGENTLOADOUT_MCP_COMMAND", "uv tool run --from git+https://example.invalid/x agentloadout mcp")
+    assert cli.mcp_spec()["command"] == "uv"
+
+
 def test_mcp_spec_tool_install_uses_absolute_path(monkeypatch, tmp_path):
     tools = tmp_path / "tools"
     bindir = tools / "agentloadout" / "bin"

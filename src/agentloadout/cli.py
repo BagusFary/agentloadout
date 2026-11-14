@@ -19,6 +19,7 @@ import argparse
 import getpass
 import json
 import os
+import shlex
 import sys
 
 from . import __version__
@@ -58,10 +59,12 @@ def mcp_spec() -> dict:
       package of the same name, and the cache path disappears on `uv cache clean`;
     - AGENTLOADOUT_MCP_COMMAND overrides everything (development), but never a bare `uvx agentloadout`."""
     if os.environ.get("AGENTLOADOUT_MCP_COMMAND"):
-        parts = os.environ["AGENTLOADOUT_MCP_COMMAND"].split()
-        if os.path.basename(parts[0]).startswith("uvx") and "--from" not in parts:
-            raise SetupError("AGENTLOADOUT_MCP_COMMAND memakai `uvx` tanpa `--from`; itu mengambil paket PyPI "
-                             "lain yang bernama sama. Pakai path absolut hasil `uv tool install`.")
+        parts = shlex.split(os.environ["AGENTLOADOUT_MCP_COMMAND"], posix=os.name != "nt")
+        exe = os.path.basename(parts[0]).lower().removesuffix(".exe")
+        via_pypi = exe == "uvx" or (exe == "uv" and parts[1:3] == ["tool", "run"]) or (exe == "uv" and parts[1:2] == ["x"])
+        if via_pypi and not any(p == "--from" or p.startswith("--from=") for p in parts):
+            raise SetupError("AGENTLOADOUT_MCP_COMMAND memakai `uvx`/`uv tool run` tanpa `--from`; itu mengambil paket "
+                             "PyPI lain yang bernama sama. Pakai path absolut hasil `uv tool install`.")
         return {"command": parts[0], "args": parts[1:]}
     if _ephemeral_env():
         raise SetupError("agentloadout sedang berjalan dari environment sementara uv (uvx), yang bisa hilang kapan saja.\n"
@@ -365,9 +368,8 @@ def main(argv=None):
             i = h.info()
             print(f"{'✓' if i['detected'] else '·'} {i['name']:12} config: {i['config']}")
     elif a.cmd == "refresh":
-        from . import backup, collector
-        backup.main_args([])
-        collector.main()
+        from . import refresh
+        sys.exit(refresh.run_locked())  # same lock as the MCP background refresh
     elif a.cmd == "mcp":
         from . import mcp_server
         mcp_server.main()

@@ -45,7 +45,8 @@ start a new session; Cursor — reload the window.
 agentloadout set-pin      # or "$(uv tool dir --bin)/agentloadout" set-pin
 ```
 
-Every install or removal plan needs this PIN to be approved, in the terminal or in the web UI.
+The PIN has at least 8 digits; a longer one is safer (see *Limits*). Every install or removal plan needs
+this PIN to be approved, in the terminal or in the web UI.
 
 > **Agents: never approve a plan.** Do not run `agentloadout approve` or `set-pin`, do not call the
 > approval web API, do not edit files in the Agent Loadout data folder, do not use a pseudo-terminal,
@@ -129,7 +130,9 @@ Every config file is backed up before it changes; removing an item restores it.
   than one hour, or modified after approval. Approval needs the approval PIN (set with
   `agentloadout set-pin`, stored as a salted scrypt hash, mode 0600) — in the web UI or with
   `agentloadout approve` in an interactive terminal, never through the MCP connection. The web UI asks
-  for the PIN even when it has no password. Five wrong PINs lock approvals for 15 minutes.
+  for the PIN even when it has no password. Five wrong PINs lock approvals for 15 minutes; the counter
+  is stored in the same file as the PIN hash, so deleting it also deletes the PIN, and an unreadable
+  record locks approvals.
   `set-pin` refuses to run inside an agent session (`CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_SESSION_ID`,
   `CODEX_SESSION_ID`, `CODEX_THREAD_ID`) and changing the PIN needs the old one. The plan records how it
   was approved (`approved_by: pin:cli` or `pin:web`).
@@ -145,6 +148,11 @@ Every config file is backed up before it changes; removing an item restores it.
   pseudo-terminal with the agent variables removed, or edit harness configs directly. None of these is a
   documented one-step path, and each is a deliberate file change your harness shows you. Keep your
   harness' own command approval prompts turned on and never tell an agent your PIN.
+- **The PIN hash can be guessed offline.** `approval_pin.json` is readable by your user, so a program
+  running as you can copy it and try PINs without the 5-try limit. scrypt makes each try slow (measured: about
+  0.19 s per try on one laptop core). Estimate: trying every 8-digit PIN takes about 220 core-days, so
+  a machine with many cores, or a GPU, can still do it.
+  Use 10 or more digits if agents run with broad shell access.
 
 ## Configuration
 

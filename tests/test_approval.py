@@ -4,6 +4,7 @@ import json
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -12,7 +13,7 @@ import pytest
 
 from conftest import AGENT_MARKERS
 
-PIN = "246810"
+PIN = "24681357"
 
 
 @pytest.fixture
@@ -68,7 +69,7 @@ def test_pseudo_tty_without_pin_set_is_refused(cat):
 def test_pseudo_tty_with_wrong_or_empty_pin_is_refused(cat):
     cat.set_pin(PIN)
     pid = cat.plan()
-    for typed in ("", "135791"):
+    for typed in ("", "13579111"):
         rc, out = cat.pty("approve", pid, answers=[("PIN persetujuan", typed)])
         assert rc == 2 and "PIN salah" in out, out
         assert status(cat, pid) == "pending"
@@ -121,11 +122,11 @@ def test_set_pin_stores_scrypt_hash_0600_and_change_needs_old_pin(sb):
     assert stat.S_IMODE(f.stat().st_mode) == 0o600
     assert rec["algo"] == "scrypt" and len(rec["salt"]) == 32 and PIN not in f.read_text()
 
-    rc, out = sb.pty("set-pin", answers=[("PIN lama", "999999"), ("PIN baru", "111111"), ("Ulangi", "111111")])
+    rc, out = sb.pty("set-pin", answers=[("PIN lama", "99999999"), ("PIN baru", "11111111"), ("Ulangi", "11111111")])
     assert rc == 2 and "PIN salah" in out
     assert json.loads(f.read_text())["hash"] == rec["hash"]
 
-    rc, out = sb.pty("set-pin", answers=[("PIN lama", PIN), ("PIN baru", "12345"), ("Ulangi", "12345")])
+    rc, out = sb.pty("set-pin", answers=[("PIN lama", PIN), ("PIN baru", "1234567"), ("Ulangi", "1234567")])
     assert rc == 2 and "digit" in out  # too short
 
     rc, out = sb.pty("set-pin", answers=[("PIN lama", PIN), ("PIN baru", "11223344"), ("Ulangi", "11223344")])
@@ -178,7 +179,7 @@ def test_web_approve_needs_pin_even_without_password(cat, web):
     cat.set_pin(PIN)
     code, res = web.approve(pid, {"apply": True})
     assert code == 403
-    code, res = web.approve(pid, {"apply": True, "pin": "000000"})
+    code, res = web.approve(pid, {"apply": True, "pin": "00000000"})
     assert code == 403 and "PIN salah" in res["error"]
     assert status(cat, pid) == "pending"
     code, res = web.approve(pid, {"apply": True, "pin": PIN})
@@ -191,7 +192,7 @@ def test_web_approve_needs_pin_even_without_password(cat, web):
 def test_web_approve_locks_after_five_wrong_pins(cat, web):
     cat.set_pin(PIN)
     pid = cat.plan()
-    codes = [web.approve(pid, {"pin": f"10000{i}"})[0] for i in range(5)]
+    codes = [web.approve(pid, {"pin": f"1000000{i}"})[0] for i in range(5)]
     assert codes == [403, 403, 403, 403, 429], codes
     code, res = web.approve(pid, {"pin": PIN})
     assert code == 429 and "dikunci" in res["error"]
@@ -200,4 +201,58 @@ def test_web_approve_locks_after_five_wrong_pins(cat, web):
     rc, out = cat.pty("approve", pid, answers=[("PIN persetujuan", PIN)])
     assert rc == 2 and "dikunci" in out
     log = web.log.read_text()
-    assert PIN not in log and "100004" not in log
+    assert PIN not in log and "10000004" not in log
+
+
+# ------------------------------------------------------------------ the lock cannot be reset on its own (W1)
+def _lock_out(sb, pid):
+    for i in range(5):
+        sb.py(f"from agentloadout import pin\ntry: pin.verify('3000000{i}')\nexcept pin.PinError: pass")
+    rec = json.loads((sb.al / "approval_pin.json").read_text())
+    assert rec["fails"] == 5 and rec["locked_until"] > time.time()
+    assert not (sb.al / "approval_pin.fails").exists()  # no separate counter file to delete
+
+
+def test_corrupted_pin_record_keeps_approvals_locked(cat, web):
+    cat.set_pin(PIN)
+    pid = cat.plan()
+    _lock_out(cat, pid)
+    (cat.al / "approval_pin.json").write_text('{"algo": "scrypt", "fails": 0')  # an agent "resets" the counter
+    rc, out = cat.pty("approve", pid, answers=[("PIN persetujuan", PIN)])
+    assert rc == 2 and "tidak valid" in out, out
+    code, res = web.approve(pid, {"pin": PIN})
+    assert code == 429 and "tidak valid" in res["error"]
+    rc, out = cat.pty("set-pin", answers=[("PIN lama", PIN), ("PIN baru", "55556666"), ("Ulangi", "55556666")])
+    assert rc == 2  # cannot set a new PIN over a broken record without deleting it
+    assert status(cat, pid) == "pending"
+
+
+def test_deleting_the_counter_deletes_the_pin(cat, web):
+    cat.set_pin(PIN)
+    pid = cat.plan()
+    _lock_out(cat, pid)
+    (cat.al / "approval_pin.json").unlink()
+    rc, out = cat.pty("approve", pid, answers=[("PIN persetujuan", PIN)])
+    assert rc == 2 and "set-pin" in out
+    code, res = web.approve(pid, {"pin": PIN})
+    assert code == 409
+    assert status(cat, pid) == "pending"
+
+
+def test_cli_and_web_failures_are_counted_together(cat, web):
+    """Three CLI processes and two web requests fail at the same moment: no count may be lost."""
+    cat.set_pin(PIN)
+    pid = cat.plan()
+    code = "from agentloadout import pin\ntry: pin.verify('11111111')\nexcept pin.PinError as e: print(type(e).__name__)"
+    procs = [subprocess.Popen([sys.executable, "-c", code], env=cat.env, stdout=subprocess.PIPE, text=True) for _ in range(3)]
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(web.approve(pid, {"pin": "22222222"})[0])) for _ in range(2)]
+    for t in threads:
+        t.start()
+    outs = [p.communicate(timeout=60)[0].strip() for p in procs]
+    for t in threads:
+        t.join(60)
+    rec = json.loads((cat.al / "approval_pin.json").read_text())
+    assert rec["fails"] == 5 and rec["locked_until"] > time.time(), (rec, outs, results)
+    assert sorted(results) in ([403, 403], [403, 429]) and outs.count("PinLocked") + results.count(429) == 1
+    assert status(cat, pid) == "pending"

@@ -2,6 +2,8 @@
 import json
 import os
 import subprocess
+import sys
+import threading
 import time
 
 import pytest
@@ -13,44 +15,78 @@ def home(tmp_path, monkeypatch):
     return tmp_path / "al"
 
 
-def dead_pid() -> int:
-    p = subprocess.Popen(["true"])
-    p.wait()
-    return p.pid
+def _holder(path):
+    """Another process that holds the refresh lock until killed."""
+    code = ("import sys, time\nfrom agentloadout import filelock\nfilelock.acquire(__import__('pathlib').Path(sys.argv[1]))\n"
+            "print('held', flush=True)\ntime.sleep(60)")
+    p = subprocess.Popen([sys.executable, "-c", code, str(path)], stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "held"
+    return p
 
 
-def test_lock_with_dead_pid_is_stale(home):
+def test_lock_file_with_live_foreign_pid_is_stale(home):
+    """A PID in the file means nothing: an unrelated live process (reused PID) does not block a refresh."""
     from agentloadout import refresh
-    refresh.lock_path().write_text(str(dead_pid()))
-    assert not refresh.running()
-    assert refresh.acquire()
-    assert refresh.lock_pid() == os.getpid()
-    refresh.release()
-    assert not refresh.lock_path().exists()
-
-
-def test_lock_with_live_pid_blocks(home):
-    from agentloadout import refresh
-    p = subprocess.Popen(["sleep", "30"])
+    other = subprocess.Popen(["sleep", "30"])
     try:
-        refresh.lock_path().write_text(str(p.pid))
-        assert refresh.running()
-        assert not refresh.acquire()
-        assert refresh.lock_pid() == p.pid
+        refresh.lock_path().write_text(str(other.pid))  # e.g. left by v0.2.0-draft or a crashed refresh
+        refresh.pid_path().write_text(str(other.pid))
+        assert not refresh.running()
+        fd = refresh.try_lock()
+        assert fd is not None
+        os.close(fd)
     finally:
-        p.kill()
+        other.kill()
+        other.wait()
+
+
+def test_held_lock_blocks_and_is_freed_when_the_holder_dies(home):
+    from agentloadout import refresh
+    p = _holder(refresh.lock_path())
+    try:
+        assert refresh.running()
+        assert refresh.try_lock() is None
+        assert not refresh.start_background()
+    finally:
+        p.kill()  # SIGKILL: no cleanup code runs
         p.wait()
     assert not refresh.running()
 
 
-def test_legacy_lock_without_pid(home):
+def test_two_concurrent_start_background_start_one_worker(home, tmp_path, monkeypatch):
     from agentloadout import refresh
-    f = refresh.lock_path()
-    f.write_text("")
-    assert refresh.running()  # just created: may be in use
-    old = time.time() - 3600
-    os.utime(f, (old, old))
+    marker = tmp_path / "workers.txt"
+    monkeypatch.setattr(refresh, "WORKER", [sys.executable, "-c",
+                        "import os, sys, time; open(sys.argv[1], 'a').write(f'{os.getpid()}\\n'); time.sleep(2)", str(marker)])
+    gate, started = threading.Barrier(2), []
+
+    def go():
+        gate.wait()
+        started.append(refresh.start_background())
+
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert sorted(started) == [False, True]
+    assert refresh.running()  # the worker holds the lock after start_background returned
+    deadline = time.time() + 15
+    while refresh.running() and time.time() < deadline:
+        time.sleep(0.2)
     assert not refresh.running()
+    assert len(marker.read_text().splitlines()) == 1
+
+
+def test_cli_refresh_uses_the_same_lock(sb):
+    from agentloadout import filelock
+    sb.al.mkdir(parents=True, exist_ok=True)
+    fd = filelock.acquire(sb.al / "refresh.lock")
+    try:
+        r = sb.cli("refresh")
+        assert r.returncode == 1 and "sedang berjalan" in r.stderr
+    finally:
+        filelock.release(fd)
 
 
 # ------------------------------------------------------------------ collector without network

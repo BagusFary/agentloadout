@@ -1,123 +1,90 @@
-"""Catalog refresh in its own process.
+"""Catalog refresh in its own process, guarded by a kernel file lock.
 
 The MCP server starts `python -m agentloadout.refresh` in a new session, so the refresh keeps running when
-the harness stops the MCP server. <home>/refresh.lock holds the PID of the running refresh; a lock whose
-PID is gone is stale and is taken over.
+the harness stops the MCP server. Whoever refreshes (that worker or `agentloadout refresh`) holds an
+exclusive lock on <home>/refresh.lock for the whole run. The kernel drops the lock when the process dies,
+so a crashed refresh never blocks the next one and a reused PID means nothing. The PID is only written
+to <home>/refresh.pid as information.
+
+start_background() takes the lock *before* it starts the worker and hands the locked file to it, so two
+concurrent callers cannot both start one.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-from . import paths
+from . import filelock, paths
 
-LEGACY_GRACE = 60  # seconds a lock without a readable PID counts as alive (it is being written)
-_proc: subprocess.Popen | None = None
+WORKER = [sys.executable, "-m", "agentloadout.refresh"]  # tests replace this
 
 
 def lock_path() -> Path:
     return paths.home() / "refresh.lock"
 
 
+def pid_path() -> Path:
+    return paths.home() / "refresh.pid"
+
+
 def log_path() -> Path:
     return paths.home() / "refresh.log"
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if _proc is not None and _proc.pid == pid:
-        return _proc.poll() is None  # our own child: a zombie is dead
-    if os.name == "nt":
-        try:
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, timeout=10).stdout
-            return str(pid) in out
-        except (OSError, subprocess.SubprocessError):
-            return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists, owned by someone else
-    try:  # a zombie (exited, not yet reaped) is not running
-        with open(f"/proc/{pid}/stat") as fh:
-            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
-    except (OSError, IndexError):
-        return True
+def _write_pid(pid: int):
+    tmp = pid_path().with_name("refresh.pid.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(str(pid))
+    os.replace(tmp, pid_path())
 
 
-def lock_pid() -> int | None:
+def try_lock() -> int | None:
+    """The locked fd, or None when a refresh holds the lock."""
     try:
-        return int(lock_path().read_text().strip())
-    except (OSError, ValueError):
+        return filelock.acquire(lock_path(), blocking=False)
+    except BlockingIOError:
         return None
 
 
 def running() -> bool:
-    """True when a refresh is running (lock present and its process alive)."""
-    f = lock_path()
-    if not f.exists():
+    """True while some process holds the refresh lock. Lock-file contents (old PIDs) do not matter."""
+    if not lock_path().exists():
         return False
-    pid = lock_pid()
-    if pid is None:
-        try:
-            return time.time() - f.stat().st_mtime < LEGACY_GRACE
-        except OSError:
-            return False
-    return _pid_alive(pid)
-
-
-def acquire(pid: int | None = None) -> bool:
-    """Create the lock for `pid` (default: this process). Stale locks are replaced. False if a refresh runs."""
-    f = lock_path()
-    for _ in range(2):
-        try:
-            fd = os.open(f, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            if running():
-                return False
-            f.unlink(missing_ok=True)
-            continue
-        with os.fdopen(fd, "w") as fh:
-            fh.write(str(pid or os.getpid()))
+    fd = try_lock()
+    if fd is None:
         return True
+    filelock.release(fd)
     return False
 
 
-def release():
-    if lock_pid() == os.getpid():
-        lock_path().unlink(missing_ok=True)
-
-
 def start_background() -> bool:
-    """Start a detached refresh process unless one is running. Returns True if started."""
-    global _proc
-    if not acquire():
+    """Start a detached refresh process unless one is running. Returns True if this call started it."""
+    fd = try_lock()
+    if fd is None:
         return False
-    log = open(log_path(), "a")
     try:
-        _proc = subprocess.Popen([sys.executable, "-m", "agentloadout.refresh"], stdin=subprocess.DEVNULL,
-                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=os.environ.copy())
-    except OSError:
-        lock_path().unlink(missing_ok=True)
-        raise
+        with open(log_path(), "a") as log:
+            kw = {"pass_fds": (fd,)} if os.name != "nt" else {}
+            proc = subprocess.Popen([*WORKER, "--lock-fd", str(fd)] if os.name != "nt" else WORKER,
+                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True, env=os.environ.copy(), **kw)
+        _write_pid(proc.pid)
     finally:
-        log.close()
-    lock_path().write_text(str(_proc.pid))
+        os.close(fd)  # the worker holds the same open file, so the lock stays until it exits
     return True
 
 
-def main():
-    """Worker: back up, then collect. Holds the lock (own PID) for its whole run."""
-    pid = lock_pid()
-    if pid not in (None, os.getpid(), os.getppid()) and _pid_alive(pid):
-        print("agentloadout: refresh lain sedang berjalan", file=sys.stderr)
-        return 1
-    lock_path().write_text(str(os.getpid()))
+def run_locked(fd: int | None = None) -> int:
+    """Back up and collect while holding the lock (`fd` = lock inherited from start_background)."""
+    if fd is None:
+        fd = try_lock()
+        if fd is None:
+            print("agentloadout: refresh lain sedang berjalan; coba lagi nanti.", file=sys.stderr)
+            return 1
+    _write_pid(os.getpid())
     try:
         from . import backup, collector
         backup.main_args([])
@@ -127,7 +94,14 @@ def main():
         print(f"agentloadout: refresh gagal: {e}", file=sys.stderr)
         return 1
     finally:
-        release()
+        pid_path().unlink(missing_ok=True)
+        os.close(fd)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    fd = int(argv[1]) if len(argv) == 2 and argv[0] == "--lock-fd" else None
+    return run_locked(fd)
 
 
 if __name__ == "__main__":
