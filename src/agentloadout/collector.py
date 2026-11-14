@@ -1,13 +1,18 @@
 """Collect MCP servers, agent skills and agent apps from GitHub + the official MCP registry.
 
 Usage: GITHUB_TOKEN_FILE=/path/to/token python3 collect.py
+
+Without a GitHub token the REST API allows 60 requests per hour. READMEs and package files are then read
+from raw.githubusercontent.com (no API quota). When the API quota runs out, enrichment that needs the API
+(the file tree that finds SKILL.md folders) stops: the item is saved with checked=0 ("belum diperiksa")
+instead of silently empty data, and a later run continues. Items are committed in batches, so a run that
+is stopped keeps what it finished; without a token, unchanged items that were already examined are reused.
 """
 import concurrent.futures as cf
 import datetime as dt
 import json
 import os
 import re
-import sys
 import time
 
 import requests
@@ -34,15 +39,39 @@ if _tok:
     S.headers["Authorization"] = f"Bearer {_tok}"
 
 
+class QuotaExhausted(RuntimeError):
+    """The GitHub API quota is used up until its reset (more than MAX_WAIT seconds away)."""
+
+
+MAX_WAIT = 120
+QUOTA = {}  # resource ("core" | "search") -> reset epoch, set once the quota ran out
+
+
+def _resource(path):
+    return "search" if path.startswith("/search/") else "core"
+
+
 def gh_get(path, params=None, accept=None, ok404=True):
+    res = _resource(path)
+    if QUOTA.get(res, 0) > time.time():
+        raise QuotaExhausted(res)
     headers = {"Accept": accept} if accept else None
     for attempt in range(4):
         r = S.get(GH + path, params=params, headers=headers, timeout=30)
         if r.status_code == 404 and ok404:
             return None
         if r.status_code in (403, 429) and "rate limit" in r.text.lower():
-            reset = int(r.headers.get("x-ratelimit-reset", time.time() + 60))
-            wait = max(5, min(120, reset - int(time.time()) + 2))
+            if r.headers.get("retry-after", "").isdigit():  # secondary rate limit: short pause
+                wait = int(r.headers["retry-after"]) + 1
+            else:
+                reset = int(r.headers.get("x-ratelimit-reset", time.time() + 60))
+                wait = reset - int(time.time()) + 2
+            if wait > MAX_WAIT:
+                QUOTA[res] = time.time() + wait
+                print(f"  kuota API GitHub ({res}) habis sampai "
+                      f"{time.strftime('%H:%M', time.localtime(time.time() + wait))}; berhenti memakai API", flush=True)
+                raise QuotaExhausted(res)
+            wait = max(5, wait)
             print(f"  rate limit, tunggu {wait}s", flush=True)
             time.sleep(wait)
             continue
@@ -58,7 +87,10 @@ def gh_get(path, params=None, accept=None, ok404=True):
 def search(q, pages=1):
     out = []
     for page in range(1, pages + 1):
-        r = gh_get("/search/repositories", {"q": q, "sort": "stars", "order": "desc", "per_page": 100, "page": page})
+        try:
+            r = gh_get("/search/repositories", {"q": q, "sort": "stars", "order": "desc", "per_page": 100, "page": page})
+        except QuotaExhausted:
+            break
         time.sleep(2.2)  # search API: 30 requests / minute
         if not r:
             break
@@ -150,9 +182,34 @@ def registry_lookup(full_name):
 
 
 # --------------------------------------------------------------------------- enrichment
-def readme(full):
-    r = gh_get(f"/repos/{full}/readme", accept="application/vnd.github.raw")
-    return r.text[:40000] if r else ""
+README_NAMES = ("README.md", "readme.md", "Readme.md", "README.MD", "README.rst", "README", "README.txt")
+
+
+def raw_file(full, branch, name):
+    """A file from raw.githubusercontent.com (does not use the REST API quota)."""
+    try:
+        r = RAW.get(f"https://raw.githubusercontent.com/{full}/{branch or 'HEAD'}/{name}", timeout=20)
+    except requests.RequestException:
+        return None
+    return r.text if r.status_code == 200 else None
+
+
+def _use_api():
+    return bool(_tok) and QUOTA.get("core", 0) <= time.time()
+
+
+def readme(full, branch="HEAD"):
+    if _use_api():
+        try:
+            r = gh_get(f"/repos/{full}/readme", accept="application/vnd.github.raw")
+            return r.text[:40000] if r else ""
+        except QuotaExhausted:
+            pass
+    for name in README_NAMES:
+        t = raw_file(full, branch, name)
+        if t is not None:
+            return t[:40000]
+    return ""
 
 
 def skill_paths(full, branch):
@@ -204,13 +261,18 @@ def skill_meta(full, branch, paths, pushed_at):
     return skills
 
 
-def root_file(full, name):
-    r = gh_get(f"/repos/{full}/contents/{name}", accept="application/vnd.github.raw")
-    return r.text if r else None
+def root_file(full, name, branch="HEAD"):
+    if _use_api():
+        try:
+            r = gh_get(f"/repos/{full}/contents/{name}", accept="application/vnd.github.raw")
+            return r.text if r else None
+        except QuotaExhausted:
+            pass
+    return raw_file(full, branch, name)
 
 
-def package_hint(full):
-    pkg = root_file(full, "package.json")
+def package_hint(full, branch="HEAD"):
+    pkg = root_file(full, "package.json", branch)
     if pkg:
         try:
             j = json.loads(pkg)
@@ -218,7 +280,7 @@ def package_hint(full):
                 return {"type": "npm", "name": j["name"], "bin": bool(j.get("bin"))}
         except ValueError:
             pass
-    py = root_file(full, "pyproject.toml")
+    py = root_file(full, "pyproject.toml", branch)
     if py:
         m = re.search(r'^\s*name\s*=\s*"([^"]+)"', py, re.M)
         if m:
@@ -416,19 +478,23 @@ def guess_kind(hint_kind, repo, reg):
 def enrich(cand):
     repo, kind = cand["repo"], cand["kind"]
     full = repo["full_name"]
+    branch = repo.get("default_branch") or "HEAD"
     reg = registry_lookup(full) if kind == "mcp" else None
-    rd = readme(full)
-    paths, hint = [], None
+    rd = readme(full, branch)
+    paths, hint, checked = [], None, True
     if kind in ("skill", "app"):
-        paths = skill_paths(full, repo.get("default_branch") or "HEAD")
-        if paths:
+        try:
+            paths = skill_paths(full, branch)
+        except QuotaExhausted:
+            checked = False  # unknown, not "no skills": keep the search-based kind and mark it
+        if checked and paths:
             kind = "skill"
-        elif kind == "skill":
+        elif checked and kind == "skill":
             kind = "app"
     if kind == "mcp" and not reg:
-        hint = package_hint(full)
+        hint = package_hint(full, branch)
     if kind == "app":
-        hint = package_hint(full)
+        hint = package_hint(full, branch)
     skills = skill_meta(full, repo.get("default_branch") or "HEAD", paths, repo.get("pushed_at")) if kind == "skill" else []
     if kind == "mcp":
         install, env = mcp_install(repo, reg, hint)
@@ -438,8 +504,23 @@ def enrich(cand):
         install, env = app_install(repo, hint), []
     return {
         "repo": repo, "kind": kind, "reg": reg, "install": install, "env": env,
-        "risks": risks_for(repo, rd, env), "paths": paths, "skills": skills,
+        "risks": risks_for(repo, rd, env), "paths": paths, "skills": skills, "checked": checked,
     }
+
+
+DATED_RISKS = ("archived", "stale", "nolicense", "surge")
+
+
+def from_db(row, repo, checked=True):
+    """Reuse an earlier enrichment for an unchanged repo (saves API quota); date/metadata risks are fresh."""
+    env = json.loads(row["env_vars"] or "[]")
+    fresh = risks_for(repo, "", env)
+    codes = {r["code"] for r in fresh}
+    old = [r for r in json.loads(row["risks"] or "[]") if r["code"] not in codes and r["code"] not in DATED_RISKS]
+    return {"repo": repo, "kind": row["kind"], "reg": {"name": row["registry_name"]} if row["registry_name"] else None,
+            "install": json.loads(row["install"] or "[]"), "env": env, "risks": fresh + old,
+            "paths": json.loads(row["skill_paths"] or "[]"), "skills": json.loads(row["skills"] or "[]"),
+            "checked": checked}
 
 
 def text_hash(text):
@@ -468,8 +549,8 @@ def main():
     try:
         run(con, t0)
     except BaseException:
-        con.rollback()  # never keep a half-written save
-        progress(con, 0, "Gagal memperbarui", running=False)
+        con.rollback()  # drop the unfinished batch; finished batches stay (a later run continues)
+        progress(con, 0, "Berhenti sebelum selesai (yang sudah tersimpan tetap ada)", running=False)
         raise
 
 
@@ -515,66 +596,103 @@ def run(con, t0):
 
     print("3/4 memperkaya data (README, skill, paket)...", flush=True)
     progress(con, 3, "Membaca detail repo", 0, len(selected))
-    results = []
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    stamp = {"now": now, "today": TODAY.isoformat(), "week_ago": (TODAY - dt.timedelta(days=7)).isoformat()}
+    old = {}
+    for c in selected:
+        row = con.execute("SELECT * FROM items WHERE id=?", (c["repo"]["full_name"].lower(),)).fetchone()
+        if row:
+            old[row["id"]] = row
+    todo, batch, done = [], [], 0
+    for c in selected:
+        row = old.get(c["repo"]["full_name"].lower())
+        # without a token, an unchanged and already examined repo is not fetched again (resume)
+        if not _tok and row and row["checked"] != 0 and row["pushed_at"] == c["repo"].get("pushed_at"):
+            r = from_db(row, c["repo"])
+            r["sources"] = sorted(c["sources"])
+            batch.append(r)
+        else:
+            todo.append(c)
+    reused = len(batch)
     with cf.ThreadPoolExecutor(max_workers=6) as ex:
-        futs = {ex.submit(enrich, c): c for c in selected}
+        futs = {ex.submit(enrich, c): c for c in todo}
         for i, f in enumerate(cf.as_completed(futs), 1):
             try:
                 r = f.result()
+                row = old.get(r["repo"]["full_name"].lower())
+                if not r["checked"] and row and row["checked"] != 0:
+                    r = from_db(row, r["repo"], checked=False)  # keep the earlier details, flagged as not re-checked
                 r["sources"] = sorted(futs[f]["sources"])
-                results.append(r)
+                batch.append(r)
             except Exception as e:
                 print("  gagal:", futs[f]["repo"]["full_name"], e, flush=True)
+            if len(batch) >= BATCH:
+                done += save_batch(con, batch, stamp)
+                batch = []
             if i % 100 == 0:
-                print(f"  {i}/{len(selected)}", flush=True)
-            if i % 20 == 0 or i == len(selected):
-                progress(con, 3, "Membaca detail repo", i, len(selected))
+                print(f"  {i}/{len(todo)}", flush=True)
+            if i % 20 == 0 or i == len(todo):
+                progress(con, 3, "Membaca detail repo", reused + i, len(selected))
 
     save_cache()
     print("4/4 menyimpan...", flush=True)
     progress(con, 4, "Menyimpan")
-    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    today = TODAY.isoformat()
-    week_ago = (TODAY - dt.timedelta(days=7)).isoformat()
-    seen = set()
-    for r in results:
-        repo = r["repo"]
-        key = repo["full_name"].lower()
-        seen.add(key)
-        stars = repo["stargazers_count"]
-        con.execute("INSERT OR REPLACE INTO star_snapshots(id, day, stars) VALUES(?,?,?)", (key, today, stars))
-        old = con.execute("SELECT stars, day FROM star_snapshots WHERE id=? AND day<=? ORDER BY day DESC LIMIT 1",
-                          (key, week_ago)).fetchone()
-        if old:
-            s7 = stars - old["stars"]
-            momentum, basis = s7 / 7.0, "7d"
-        else:
-            s7 = None
-            age = max(1, (TODAY - dt.date.fromisoformat(repo["created_at"][:10])).days)
-            momentum, basis = stars / age, "lifetime"
-        first = con.execute("SELECT first_seen FROM items WHERE id=?", (key,)).fetchone()
-        con.execute(
-            """INSERT OR REPLACE INTO items(id, kind, name, full_name, url, description, topics, language, license,
-               stars, forks, open_issues, created_at, pushed_at, archived, homepage, category, install, env_vars, risks,
-               skill_paths, registry_name, stars_7d, momentum, momentum_basis, sources, first_seen, updated_at,
-               skills, default_branch, description_id)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (key, r["kind"], repo["name"], repo["full_name"], repo["html_url"], repo.get("description"),
-             json.dumps(repo.get("topics") or []), repo.get("language"),
-             (repo.get("license") or {}).get("spdx_id") if repo.get("license") else None,
-             stars, repo.get("forks_count"), repo.get("open_issues_count"), repo.get("created_at"), repo.get("pushed_at"),
-             int(bool(repo.get("archived"))), repo.get("homepage"), categorize(repo), json.dumps(r["install"]),
-             json.dumps(r["env"]), json.dumps(r["risks"]), json.dumps(r["paths"]),
-             (r["reg"] or {}).get("name"), s7, round(momentum, 2), basis, json.dumps(r["sources"]),
-             first["first_seen"] if first else now, now,
-             json.dumps(r["skills"]), repo.get("default_branch"), translated(con, repo.get("description"))))
+    done += save_batch(con, batch, stamp)
+    if reused:
+        print(f"  {reused} item tidak berubah, dipakai ulang tanpa request API", flush=True)
     # drop items that disappeared from every source for 30 days
     con.execute("DELETE FROM items WHERE updated_at < ?", ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat(),))
     counts = {k: v for k, v in con.execute("SELECT kind, COUNT(*) FROM items GROUP BY kind")}
-    db.set_meta(con, "last_run", {"at": now, "seconds": round(time.time() - t0), "counts": counts})
+    unchecked = con.execute("SELECT COUNT(*) FROM items WHERE checked=0").fetchone()[0]
+    db.set_meta(con, "last_run", {"at": now, "seconds": round(time.time() - t0), "counts": counts,
+                                  "unchecked": unchecked, "token": bool(_tok)})
     db.set_meta(con, "progress", {"running": False, "step": 4, "steps": 4, "label": "Selesai", "at": now})
     con.commit()
-    print(f"selesai dalam {round(time.time() - t0)} detik: {counts}", flush=True)
+    print(f"selesai dalam {round(time.time() - t0)} detik: {counts}" + (f", belum diperiksa: {unchecked}" if unchecked else ""), flush=True)
+
+
+BATCH = 25
+
+
+def save_batch(con, results, stamp) -> int:
+    """Write finished items and commit, so a stopped run keeps them."""
+    for r in results:
+        save_item(con, r, stamp["now"], stamp["today"], stamp["week_ago"])
+    con.commit()
+    return len(results)
+
+
+def save_item(con, r, now, today, week_ago):
+    repo = r["repo"]
+    key = repo["full_name"].lower()
+    stars = repo["stargazers_count"]
+    con.execute("INSERT OR REPLACE INTO star_snapshots(id, day, stars) VALUES(?,?,?)", (key, today, stars))
+    old = con.execute("SELECT stars, day FROM star_snapshots WHERE id=? AND day<=? ORDER BY day DESC LIMIT 1",
+                      (key, week_ago)).fetchone()
+    if old:
+        s7 = stars - old["stars"]
+        momentum, basis = s7 / 7.0, "7d"
+    else:
+        s7 = None
+        age = max(1, (TODAY - dt.date.fromisoformat(repo["created_at"][:10])).days)
+        momentum, basis = stars / age, "lifetime"
+    first = con.execute("SELECT first_seen FROM items WHERE id=?", (key,)).fetchone()
+    con.execute(
+        """INSERT OR REPLACE INTO items(id, kind, name, full_name, url, description, topics, language, license,
+           stars, forks, open_issues, created_at, pushed_at, archived, homepage, category, install, env_vars, risks,
+           skill_paths, registry_name, stars_7d, momentum, momentum_basis, sources, first_seen, updated_at,
+           skills, default_branch, description_id, checked)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (key, r["kind"], repo["name"], repo["full_name"], repo["html_url"], repo.get("description"),
+         json.dumps(repo.get("topics") or []), repo.get("language"),
+         (repo.get("license") or {}).get("spdx_id") if repo.get("license") else None,
+         stars, repo.get("forks_count"), repo.get("open_issues_count"), repo.get("created_at"), repo.get("pushed_at"),
+         int(bool(repo.get("archived"))), repo.get("homepage"), categorize(repo), json.dumps(r["install"]),
+         json.dumps(r["env"]), json.dumps(r["risks"]), json.dumps(r["paths"]),
+         (r["reg"] or {}).get("name"), s7, round(momentum, 2), basis, json.dumps(r["sources"]),
+         first["first_seen"] if first else now, now,
+         json.dumps(r["skills"]), repo.get("default_branch"), translated(con, repo.get("description")),
+         1 if r.get("checked", True) else 0))
 
 
 if __name__ == "__main__":

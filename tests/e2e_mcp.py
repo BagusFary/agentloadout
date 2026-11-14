@@ -1,6 +1,9 @@
 """End-to-end test: real MCP client <-> agentloadout MCP server over stdio, in a throwaway HOME.
 
-Run: uv run python tests/e2e_mcp.py /path/to/catalog.db
+Run: uv run python tests/e2e_mcp.py /path/to/katalog.db   (a copy is used; the file itself is never changed)
+
+Approvals need the human's PIN, so this script approves through the Python API (plans.approve), exactly
+as a human approval would record it. There is no environment switch that lets a process approve.
 """
 import asyncio
 import json
@@ -20,14 +23,21 @@ T = Path(tempfile.mkdtemp(prefix="al-e2e-"))
 (T / ".codex").mkdir()
 (T / ".cursor" / "mcp.json").write_text('{"mcpServers": {"existing": {"command": "x"}}}\n')
 ENV = {**os.environ, "HOME": str(T), "AGENTLOADOUT_HOME": str(T / "al"), "AGENTLOADOUT_DB": str(T / "al" / "catalog.db"),
-       "XDG_CONFIG_HOME": str(T / ".config"), "XDG_DATA_HOME": str(T / ".local/share"),
-       "AGENTLOADOUT_ALLOW_NONINTERACTIVE_APPROVAL": "1"}  # tests only: approvals normally need a terminal
+       "XDG_CONFIG_HOME": str(T / ".config"), "XDG_DATA_HOME": str(T / ".local/share")}
+for _k in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "GITHUB_TOKEN", "GITHUB_TOKEN_FILE", "AGENTLOADOUT_PORT"):
+    ENV.pop(_k, None)
 (T / "al").mkdir()
 shutil.copy(SRC_DB, T / "al" / "catalog.db")
 
 
 def cli(*args):
     return subprocess.run([sys.executable, "-m", "agentloadout.cli", *args], env=ENV, capture_output=True, text=True, timeout=120)
+
+
+def approve(plan_id):
+    """Test-only stand-in for the human: approve through the Python API in the throwaway HOME."""
+    code = f"from agentloadout import plans; print(plans.approve({plan_id!r}, 'pin:test')['status'])"
+    return subprocess.run([sys.executable, "-c", code], env=ENV, capture_output=True, text=True, timeout=60)
 
 
 def data(res):
@@ -59,8 +69,10 @@ async def main():
             denied = data(await s.call_tool("apply_plan", {"plan_id": pid}))
             print("apply TANPA persetujuan ->", "DITOLAK" if "error" in denied else "LOLOS (BUG!)", "|", denied.get("error", "")[:70])
 
-            out = cli("approve", pid, "--yes")
-            print("cli approve ->", out.stdout.strip().splitlines()[-1] if out.returncode == 0 else out.stderr)
+            out = cli("approve", pid)
+            print("cli approve tanpa TTY/PIN ->", "DITOLAK" if out.returncode == 2 else "LOLOS (BUG!)")
+            out = approve(pid)
+            print("approve (API, pengganti manusia) ->", out.stdout.strip() or out.stderr)
 
             done = data(await s.call_tool("apply_plan", {"plan_id": pid}))
             print("apply ->", done["status"], [(x["harness"], x["ok"], x.get("error", "")[:60]) for x in done["results"]])
@@ -72,7 +84,7 @@ async def main():
             print("list_installed:", [(x["item_id"], x["harness"], x["version"]) for x in inst["installed"]], "| harness_mcp:", inst["harness_mcp"])
 
             rm = data(await s.call_tool("plan_remove", {"item_id": "upstash/context7", "targets": ["cursor", "codex", "claude-code"]}))
-            cli("approve", rm["id"], "--yes")
+            approve(rm["id"])
             rmd = data(await s.call_tool("apply_plan", {"plan_id": rm["id"]}))
             print("remove ->", rmd["status"], "| cursor sekarang:", sorted(json.loads((T / ".cursor/mcp.json").read_text())["mcpServers"]))
 
@@ -80,7 +92,7 @@ async def main():
             print("rencana skill:", sk.get("id"), [c["target"] for c in sk.get("changes", [])])
             rej = data(await s.call_tool("apply_plan", {"plan_id": sk["id"]}))
             print("apply skill tanpa persetujuan ->", "DITOLAK" if "error" in rej else "LOLOS (BUG!)")
-            cli("approve", sk["id"], "--yes")
+            approve(sk["id"])
             skd = data(await s.call_tool("apply_plan", {"plan_id": sk["id"]}))
             print("apply skill ->", skd["status"], [os.path.exists(x.get("path", "")) for x in skd["results"]])
 

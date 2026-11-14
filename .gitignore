@@ -3,3 +3,7 @@ __pycache__/
 data/
 .venv/
 uv.lock
+dist/
+# personal notes for the owner's own instance: kept on disk, never committed (backup outside the repo)
+docs/PERSONAL.md
+docs/PLAYBOOK.md

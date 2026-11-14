@@ -25,13 +25,21 @@ Catatan: web hanya hidup selama laptop HomeLab Soulmate menyala.
 - Deskripsi per skill (≈3.700) belum diterjemahkan; hanya deskripsi repo.
 
 ## Agent Loadout sebagai MCP + CLI (14 Nov 2026)
-Selesai: paket Python `agentloadout` (uvx), adapter Claude Code/Codex/Cursor/Gemini/OpenCode/OpenBot,
+Selesai: paket Python `agentloadout`, adapter Claude Code/Codex/Cursor/Gemini/OpenCode/OpenBot,
 MCP server 10 tool, rencana + persetujuan manusia (web/terminal), inspect_repo, setup/uninstall sekali
 perintah, web on-demand, skill panduan, README Inggris, LICENSE MIT. Uji: e2e MCP + instalasi bersih lolos.
 
 Sisa:
-- [ ] Rilis ke PyPI supaya `uvx agentloadout setup` jalan untuk umum (butuh akun PyPI + token, langkah user).
+- [x] Instal lewat GitHub tanpa PyPI (v0.2.0): `uv tool install git+…@v0.2.0` lalu `setup --yes`. Nama `agentloadout` di PyPI milik proyek lain, jadi tidak ada rilis PyPI.
 - [ ] Uji di macOS dan Windows (lokasi config & `which` di Windows).
 - [ ] Tampilan web berbahasa Inggris / dua bahasa untuk publik.
-- [ ] Bersihkan path pribadi di docs/PLAYBOOK.md dan docs/PERSONAL.md sebelum repo dibuat publik.
+- [x] Catatan pribadi instance (PLAYBOOK, PERSONAL) tidak lagi di-track git (v0.2.0): tetap di folder docs/ lokal, cadangan di luar repo. Riwayat git lama masih memuatnya.
 - [ ] Pasang aplikasi (kind=app) otomatis — sekarang hanya mode salin.
+
+## v0.2.0: instal lewat agen + PIN persetujuan (14 Nov 2026)
+- Instal dari GitHub dengan `uv tool install`; mode uvx ditolak (nama PyPI dipakai proyek lain).
+- `setup`/`uninstall` tanpa terminal wajib `--yes` (exit 2); `setup --token-from-env`.
+- PIN persetujuan (`agentloadout set-pin`), wajib untuk approve di CLI dan web; terkunci 15 menit setelah 5 PIN salah.
+- Refresh katalog di proses terpisah dengan kunci PID; tanpa token: README dari raw, item "belum diperiksa" saat kuota habis, simpan per batch.
+- Uninstall hanya melepas skill panduan yang dipasang setup.
+- Tes pytest (`uv run pytest`).

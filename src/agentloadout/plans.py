@@ -1,8 +1,11 @@
 """Install plans and human approval.
 
-An agent may *create* a plan, but only a human can *approve* it (from the local web UI or the CLI
-`agentloadout approve <id>`). apply() refuses any plan that is not approved, was approved more than
-an hour ago, or changed after approval (content hash).
+An agent may *create* a plan, but only a human can *approve* it, with the approval PIN, from the local
+web UI or the CLI `agentloadout approve <id>` (see pin.py). apply() refuses any plan that is not approved,
+was approved more than an hour ago, or changed after approval (content hash + approval hash).
+
+The approval hash covers status/approved_at/approved_by, so a plain edit of the plan file is refused.
+It is not a secret: a program running as the same user can still recompute it (README, *Limits*).
 """
 from __future__ import annotations
 
@@ -32,6 +35,12 @@ def _file(plan_id: str) -> Path:
 
 def _hash(plan: dict) -> str:
     core = {k: plan[k] for k in ("item_id", "kind", "targets", "mcp_name", "spec", "skill", "changes")}
+    return hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest()
+
+
+def _approval_hash(plan: dict) -> str:
+    core = {"id": plan["id"], "hash": plan["hash"], "status": "approved",
+            "approved_at": plan.get("approved_at"), "approved_by": plan.get("approved_by")}
     return hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest()
 
 
@@ -185,6 +194,7 @@ def approve(plan_id: str, by: str) -> dict:
     if _hash(p) != p["hash"]:
         raise ValueError("isi rencana berubah setelah dibuat; buat rencana baru")
     p.update(status="approved", approved_at=_now().isoformat(timespec="seconds"), approved_by=by)
+    p["approval_hash"] = _approval_hash(p)
     save(p)
     return p
 
@@ -206,6 +216,9 @@ def apply(plan_id: str) -> dict:
         raise PermissionError("persetujuan sudah lebih dari 1 jam; buat dan setujui rencana baru")
     if _hash(p) != p["hash"]:
         raise PermissionError("isi rencana berubah setelah disetujui; dibatalkan")
+    if p.get("approval_hash") != _approval_hash(p):
+        raise PermissionError("catatan persetujuan rencana tidak valid (file rencana diubah?); "
+                              f"minta pengguna menyetujui ulang: agentloadout approve {plan_id}")
 
     results, ok = [], True
     if p["kind"] == "skill":

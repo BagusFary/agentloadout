@@ -324,6 +324,8 @@ function planHtml(p) {
     ${(p.warnings || []).map((w) => `<p class="note warn">⚠ ${esc(w)}</p>`).join("")}
     ${(p.risks || []).length ? `<p class="note">Label risiko: ${p.risks.map(esc).join(", ")}</p>` : ""}
     <p class="note">Config lama dicadangkan otomatis sebelum diubah.</p>
+    <input class="pin-input" data-pin type="password" inputmode="numeric" autocomplete="off" pattern="[0-9]*" placeholder="PIN persetujuan" aria-label="PIN persetujuan">
+    <p class="note">PIN dibuat sekali oleh Anda lewat <code>agentloadout set-pin</code> di terminal. Jangan berikan ke agen.</p>
     <div class="actions"><button class="btn ghost" data-reject>Tolak</button><button class="btn primary" data-approve>Setujui & ${p.action === "install" ? "pasang" : "lepas"}</button></div>
     <div class="plan-res"></div></div>`;
 }
@@ -331,15 +333,19 @@ function planHtml(p) {
 function wirePlan(root, p, it) {
   root.querySelector("[data-reject]").onclick = async () => { try { await api(`/api/plans/${p.id}/reject`); toast("Rencana ditolak"); root.remove?.(); refreshPlans(); } catch (e) { toast("Gagal: " + e.message); } };
   root.querySelector("[data-approve]").onclick = async (ev) => {
+    const pinEl = root.querySelector("[data-pin]");
+    const pin = pinEl ? pinEl.value.trim() : "";
+    if (!pin) return toast("Masukkan PIN persetujuan");
     busy(ev.target, true, "Memasang…");
     try {
-      const r = await api(`/api/plans/${p.id}/approve`, { apply: true });
+      const r = await api(`/api/plans/${p.id}/approve`, { apply: true, pin });
+      if (pinEl) { pinEl.value = ""; pinEl.remove(); }
       busy(ev.target, false);
       root.querySelector(".plan-res").innerHTML = `<ul class="changes">${(r.results || []).map((x) => `<li><b>${x.ok === false ? "✗" : x.ok ? "✓" : "…"} ${esc(HARNESS_NAME[x.harness] || x.harness)}</b><span>${esc(x.error || x.result || (x.backup ? "selesai · cadangan dibuat" : "selesai"))}</span></li>`).join("")}</ul>${r.openbot ? `<p class="note">${esc(r.openbot)}</p>` : ""}`;
       toast(r.status === "applied" ? "Selesai" : "Sebagian gagal, lihat rincian");
       root.querySelectorAll("[data-approve],[data-reject]").forEach((b) => b.remove());
       await load(true); refreshPlans();
-    } catch (e) { busy(ev.target, false); toast("Gagal: " + e.message); }
+    } catch (e) { busy(ev.target, false); if (pinEl) pinEl.value = ""; toast("Gagal: " + e.message); }
   };
 }
 
