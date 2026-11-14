@@ -74,6 +74,7 @@ MIGRATIONS = [
     ("items", "skills", "TEXT"),                # JSON list of {path, name, description}
     ("items", "description_id", "TEXT"),        # Indonesian translation
     ("items", "default_branch", "TEXT"),
+    ("items", "checked", "INTEGER"),            # 0 = not examined yet (GitHub API quota ran out); NULL/1 = examined
 ]
 
 

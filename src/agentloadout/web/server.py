@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 from urllib.parse import parse_qs
 
-from .. import config, db
+from .. import config, db, pin
 from . import auth
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -135,7 +135,18 @@ class Handler(BaseHTTPRequestHandler):
                 who = "web:" + (self.headers.get("Tailscale-User-Login") or self.client_ip())
                 if parts[3] == "reject":
                     return self.send_json(200, plans.reject(parts[2], who))
-                p = plans.approve(parts[2], who)
+                # approval needs the PIN in the body, also when the UI has no password (agents can reach 127.0.0.1)
+                given = body.pop("pin", None)
+                try:
+                    pin.verify(given if isinstance(given, str) else "")
+                except pin.PinNotSet as e:
+                    return self.send_json(409, {"error": str(e), "pin_set": False})
+                except pin.PinLocked as e:
+                    return self.send_json(429, {"error": str(e)})
+                except pin.PinError as e:
+                    return self.send_json(403, {"error": str(e)})
+                plans.load(parts[2])  # 400 for an unknown id before anything else
+                p = plans.approve(parts[2], "pin:web")
                 if body.get("apply"):
                     p = plans.apply(parts[2])
                     p["openbot"] = self.forward_openbot(p)
@@ -185,7 +196,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"harnesses": [h.info() for h in harness.ADAPTERS.values()]})
         if path == "/api/plans":
             from .. import plans
-            return self.send_json(200, {"plans": plans.list_plans()[:50]})
+            return self.send_json(200, {"plans": plans.list_plans()[:50], "pin_set": pin.is_set()})
         if path == "/api/items":
             items, meta = load_items()
             meta["actions_allowed"] = self.via_tailnet()          # install/remove via plans (any harness)

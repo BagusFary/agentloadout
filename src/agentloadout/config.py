@@ -3,7 +3,9 @@
 Example config.toml:
 
     [github]
-    token_file = "~/.config/secrets/github_token"   # or env GITHUB_TOKEN / GITHUB_TOKEN_FILE
+    # Optional. Default: env GITHUB_TOKEN, env GITHUB_TOKEN_FILE, then <data folder>/github_token
+    # (`agentloadout setup --token-from-env` writes that file). Set token_file only for another path:
+    # token_file = "/path/to/github_token"
 
     [web]
     host = "127.0.0.1"
