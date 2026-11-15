@@ -341,18 +341,27 @@ function wirePlan(root, p, it) {
       const r = await api(`/api/plans/${p.id}/approve`, { apply: true, pin });
       if (pinEl) { pinEl.value = ""; pinEl.remove(); }
       busy(ev.target, false);
-      root.querySelector(".plan-res").innerHTML = `<ul class="changes">${(r.results || []).map((x) => `<li><b>${x.ok === false ? "✗" : x.ok ? "✓" : "…"} ${esc(HARNESS_NAME[x.harness] || x.harness)}</b><span>${esc(x.error || x.result || (x.backup ? "selesai · cadangan dibuat" : "selesai"))}</span></li>`).join("")}</ul>${r.openbot ? `<p class="note">${esc(r.openbot)}</p>` : ""}`;
-      toast(r.status === "applied" ? "Selesai" : "Sebagian gagal, lihat rincian");
+      root.querySelector(".plan-res").innerHTML = `<ul class="changes">${(r.results || []).map((x) => `<li><b>${x.ok === false ? "✗" : x.ok ? "✓" : "…"} ${esc(HARNESS_NAME[x.harness] || x.harness)}</b><span>${esc(x.error || x.result || (x.backup ? "selesai · cadangan dibuat" : "selesai"))}</span></li>`).join("")}</ul>${r.status === "awaiting_agent" ? `<p class="note warn">${esc(STATUS_LABEL.awaiting_agent)}: langkah OpenBot belum dikerjakan. Minta agen OpenBot menjalankannya; statusnya baru selesai setelah agen melapor.</p>` : ""}${r.openbot ? `<p class="note">${esc(r.openbot)}</p>` : ""}`;
+      toast(r.status === "applied" ? "Selesai" : (STATUS_LABEL[r.status] || "Sebagian gagal, lihat rincian"));
       root.querySelectorAll("[data-approve],[data-reject]").forEach((b) => b.remove());
       await load(true); refreshPlans();
     } catch (e) { busy(ev.target, false); if (pinEl) pinEl.value = ""; toast("Gagal: " + e.message); }
   };
 }
 
+const STATUS_LABEL = { pending: "Menunggu persetujuan", approved: "Disetujui", rejected: "Ditolak", revoked: "Dicabut (PIN diganti/direset)",
+  applied: "Selesai", failed: "Gagal", partial: "Sebagian berhasil", awaiting_agent: "Menunggu agen OpenBot",
+  incomplete: "Tidak lengkap: agen OpenBot tidak melapor" };
+
 // pending plans created by agents
 async function refreshPlans() {
   try {
-    const plans = (await (await fetch("/api/plans")).json()).plans || [];
+    const j = await (await fetch("/api/plans")).json();
+    const plans = j.plans || [];
+    const pr = $("#pinreset");
+    pr.hidden = !j.pin_reset_recent;
+    if (j.pin_reset_recent) pr.textContent = `PIN persetujuan direset pada ${new Date(j.pin_reset_at).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })}. Bukan Anda? Jalankan agentloadout set-pin --reset di laptop.`;
+    state.waiting = plans.filter((p) => p.status === "awaiting_agent" || p.status === "incomplete");
     state.pending = plans.filter((p) => p.status === "pending");
     const b = $("#pending");
     b.hidden = !state.pending.length;
@@ -362,7 +371,8 @@ async function refreshPlans() {
 
 function openPending() {
   $("#detail").innerHTML = `<div class="detail"><h2>Menunggu persetujuan</h2><p class="lead">Rencana yang dibuat agen. Periksa sebelum menyetujui.</p>
-    ${(state.pending || []).map((p) => `<div class="pending-item" data-pid="${esc(p.id)}"><p class="ver"><b>${esc(p.item_name)}</b> · dibuat ${esc(p.created_by)} · ${esc(ago(p.created_at))}</p>${planHtml(p)}</div>`).join("") || "<p class='note'>Tidak ada.</p>"}</div>`;
+    ${(state.pending || []).map((p) => `<div class="pending-item" data-pid="${esc(p.id)}"><p class="ver"><b>${esc(p.item_name)}</b> · dibuat ${esc(p.created_by)} · ${esc(ago(p.created_at))}</p>${planHtml(p)}</div>`).join("") || "<p class='note'>Tidak ada.</p>"}
+    ${(state.waiting || []).length ? `<h3>Menunggu agen OpenBot</h3>${state.waiting.map((p) => `<p class="note ${p.status === "incomplete" ? "warn" : ""}"><b>${esc(p.item_name)}</b> · ${esc(STATUS_LABEL[p.status])} · ${esc(ago(p.applied_at))}</p>`).join("")}` : ""}</div>`;
   document.querySelectorAll(".pending-item").forEach((el) => wirePlan(el, state.pending.find((p) => p.id === el.dataset.pid)));
   const sh = $("#sheet"); sh.classList.remove("closing"); sh.hidden = false; document.body.style.overflow = "hidden";
 }
@@ -514,4 +524,43 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetai
 loadHarnesses();
 refreshPlans(); setInterval(() => { if (!document.hidden) refreshPlans(); }, 15000);
 $("#pending").addEventListener("click", openPending);
+$("#security").addEventListener("click", openSecurity);
+
+// ---------------------------------------------------------------- security page
+// Only shows status, logs out every device, and changes an existing hashed password.
+// Creating or resetting the password and anything about the PIN happen in the terminal only.
+const when = (iso) => (iso ? new Date(iso).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" }) : "-");
+async function openSecurity() {
+  let s;
+  try { s = await (await fetch("/api/security")).json(); } catch (e) { return toast("Gagal: " + e.message); }
+  const pw = s.password || {}, pin = s.pin || {};
+  const pwText = { hashed: `Aktif (hash), dipasang ${esc(when(pw.set_at))} oleh ${esc(pw.set_by || "-")}${pw.reset_at ? ` · direset ${esc(when(pw.reset_at))}` : ""}`,
+    legacy_file: "Aktif dari file teks (password_file). Jalankan <code>agentloadout set-password</code> di laptop untuk menyimpannya sebagai hash.",
+    off: "Belum ada. Web hanya bisa dibuka di laptop ini. Untuk HP: <code>agentloadout set-password</code> di terminal laptop." }[pw.source] || "-";
+  const pinText = !pin.set ? "Belum diset: <code>agentloadout set-pin</code> di terminal laptop."
+    : pin.invalid ? "Catatan PIN rusak, persetujuan terkunci: <code>agentloadout set-pin --reset</code>."
+    : `Diset ${esc(when(pin.set_at))} oleh ${esc(pin.set_by || "-")}${pin.reset_at ? ` · <b>direset ${esc(when(pin.reset_at))}</b>` : ""}${pin.locked ? " · terkunci sementara (5× salah)" : ""}`;
+  $("#detail").innerHTML = `<div class="detail security"><h2>Keamanan</h2>
+    <p class="lead">Akses ini: ${s.scope === "local" ? "dari laptop ini" : "dari luar laptop"}${s.https ? " (HTTPS)" : ""}${s.funnel ? " · lewat Funnel (hanya lihat)" : ""}.</p>
+    <h3>Password web</h3><p class="note">${pwText}</p>
+    ${pw.source === "hashed" && s.actions_allowed ? `<form class="pwform"><input type="password" name="old" autocomplete="current-password" placeholder="Password lama" required>
+      <input type="password" name="new" autocomplete="new-password" placeholder="Password baru (10–128 karakter)" minlength="10" maxlength="128" required>
+      <input type="password" name="new2" autocomplete="new-password" placeholder="Ulangi password baru" required>
+      <div class="actions"><button class="btn primary" type="submit">Ganti password</button></div></form>` : ""}
+    ${pw.enabled && s.actions_allowed ? `<div class="actions"><button class="btn ghost" data-logoutall>Keluar dari semua perangkat</button></div>` : ""}
+    <p class="note">Lupa password? Di terminal laptop: <code>agentloadout set-password --reset</code>.</p>
+    <h3>PIN persetujuan</h3><p class="note">${pinText}</p>
+    <p class="note">PIN hanya bisa dibuat, diganti, atau direset di terminal laptop (<code>agentloadout set-pin</code>, <code>set-pin --reset</code>). Jangan berikan PIN ke agen.</p></div>`;
+  const f = $("#detail .pwform");
+  if (f) f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const d = Object.fromEntries(new FormData(f));
+    if (d.new !== d.new2) return toast("Password baru tidak sama");
+    try { const r = await api("/api/security/password", { old: d.old, new: d.new }); f.reset(); toast(r.note || "Password diganti"); }
+    catch (e) { f.reset(); toast("Gagal: " + e.message); }
+  };
+  const lo = $("#detail [data-logoutall]");
+  if (lo) lo.onclick = async () => { try { const r = await api("/api/security/logout-all"); toast(r.note || "Selesai"); } catch (e) { toast("Gagal: " + e.message); } };
+  const sh = $("#sheet"); sh.classList.remove("closing"); sh.hidden = false; document.body.style.overflow = "hidden";
+}
 load().catch((e) => { $("#updated").textContent = "Gagal memuat: " + e.message; $("#grid").innerHTML = '<p class="empty">Gagal memuat data. Coba muat ulang.</p>'; });

@@ -17,7 +17,7 @@ Paste this to your agent (Claude Code, Codex, Cursor, Gemini CLI, OpenCode):
 **1. Install and register** (the agent can run this; nothing here needs a person):
 
 ```bash
-uv tool install "git+https://github.com/BagusFary/agentloadout@v0.2.0"
+uv tool install "git+https://github.com/BagusFary/agentloadout@v0.3.0"
 "$(uv tool dir --bin)/agentloadout" setup --yes
 ```
 
@@ -82,6 +82,26 @@ own that happens to be called `agentloadout` is never touched.
 **Note:** there is no PyPI release. The package called `agentloadout` on PyPI belongs to a different
 project; do not install it from PyPI (with pip, uv or uvx).
 
+## OpenBot
+
+OpenBot keeps its MCP servers and skills inside the app, so `setup` cannot write them; an OpenBot agent
+does it with its own tools. Ask your OpenBot agent to install Agent Loadout following this README. Inside
+an OpenBot agent (`OPENBOT_AGENT_PROCESS` is set), `setup --yes` without `--to` means `--to openbot` and
+touches no other harness on the computer. It prints:
+
+- the `openbot.save_mcp_server` call (name `agentloadout`, the absolute command from `uv tool install`);
+- the guide skill folder for `openbot.create_skill` + `openbot.install_local_skill`.
+
+The agent runs both, then checks with `openbot.list_mcp_servers`. `uninstall` prints the matching
+`openbot.remove_mcp_server` call.
+
+Plans with an OpenBot target do not pretend to be finished: after approval and `apply_plan` their status
+is **awaiting_agent** ("Menunggu agen OpenBot"). The OpenBot agent runs the `agent_instructions` in the
+result, checks with `openbot.list_mcp_servers`, and reports with the MCP tool
+`report_agent_step(plan_id, harness="openbot", ok, detail)`; the plan then becomes `applied`, `failed`
+or `partial`. Without a report within one hour it becomes **incomplete**. The report is bookkeeping, not
+an approval: it cannot approve or apply anything.
+
 ## Use it from your agent
 
 > "Find an MCP server for Postgres in Agent Loadout and install it to Claude Code and Codex."
@@ -106,10 +126,69 @@ the local web UI or in your own terminal, then the agent applies it.
 agentloadout ui            # local web catalog at http://127.0.0.1:8787
 agentloadout plans         # plans waiting for approval
 agentloadout approve <id>  # approve (interactive terminal + PIN)
-agentloadout set-pin       # set or change the approval PIN
+agentloadout set-pin       # set or change the approval PIN       (--reset: forgot it)
+agentloadout set-password  # web password, needed for your phone   (--reset: forgot it, --off: remove)
 agentloadout harnesses     # detected harnesses and config paths
 agentloadout where         # data, config and backup folders
 ```
+
+## Open it from your phone (Akses dari HP)
+
+The web UI listens on `127.0.0.1` only. To reach it from a phone, put an HTTPS proxy in front of it and
+**set a web password first**, in your own terminal:
+
+```bash
+agentloadout set-password
+```
+
+Agent Loadout treats every request that is not plainly local as coming from outside: a proxy header
+(`X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `Tailscale-*`, `Cf-*`, `Ngrok-*`), a Host other than
+`127.0.0.1` / `localhost` / `[::1]`, or a non-loopback peer. Outside requests without a password only get
+a "set a password first" page. Once a password is set it is required on the laptop too.
+
+| Way | Who can reach it | What it allows |
+|---|---|---|
+| `tailscale serve --bg 8787` | your tailnet devices (HTTPS) | log in with the password, then act; approving still needs the PIN |
+| Tailscale Funnel / ngrok / Cloudflare | anyone on the internet who has the link | log in with the password; through Funnel the UI is view-only |
+
+The `tailscale serve` and `tailscale funnel` syntax above is from `tailscale serve --help` of Tailscale
+1.104.7 (`tailscale serve [--bg] <port>`; HTTPS is the default mode). Use the port shown by
+`agentloadout where`.
+
+Rules that stay the same from anywhere:
+
+- Approving a plan always needs the approval PIN; a session cookie alone never approves.
+- Identity headers such as `Tailscale-User-Login` grant nothing.
+- The session cookie is named per instance (`al_sesi_<id>`), and marked `Secure` only when the request
+  came over HTTPS, so plain-HTTP LAN access does not loop back to the login page.
+- **Do not use a raw TCP tunnel** (`ssh -R`, `tailscale serve --tcp`, frp/bore in TCP mode): it forwards
+  bytes unchanged, so an outsider can send `Host: 127.0.0.1` and look local. Use an HTTP(S) proxy.
+- A reverse proxy on the same laptop (nginx, Caddy) counts as outside and needs the password.
+- `agentloadout ui --host 0.0.0.0` prints a warning: on a LAN the password travels unencrypted.
+
+The web UI's **Security** page (shield icon) shows the password and PIN status and when they were set or
+reset, can log out every device, and can change an existing hashed password (old password required).
+It cannot create or reset a password, and it cannot touch the PIN: those happen only in the terminal.
+
+## Forgot the password or PIN
+
+Both are reset by the human, in their own terminal on the laptop. Agents are refused (agent variables
+such as `CLAUDECODE`, `CODEX_SESSION_ID`, `OPENBOT_AGENT_PROCESS`) and there is no web or MCP way.
+
+```bash
+agentloadout set-password --reset   # new web password without the old one; every device is logged out
+agentloadout set-pin --reset        # type RESET, then a new PIN; works even when the PIN is locked or broken
+```
+
+A PIN reset is recorded: approved plans that were not applied yet become `revoked`, apply refuses any
+approval made with an earlier PIN (each approval stores the PIN generation it was made with), and
+"PIN direset pada <time>" shows in `agentloadout where` and as a banner in the web UI for 7 days. If you
+did not reset it yourself, something on your account did: reset it again and check your agents. Changing
+the PIN normally (`set-pin`, old PIN required) revokes approved plans the same way.
+
+If the web UI says the port is busy: without `--port`, Agent Loadout picks the next free port (up to +10)
+and `agentloadout where` shows it; with `--port` (or `AGENTLOADOUT_PORT`) it stops with a clear error.
+`open_dashboard` only returns the address of its own instance.
 
 ## Supported harnesses
 
@@ -133,21 +212,25 @@ Every config file is backed up before it changes; removing an item restores it.
   for the PIN even when it has no password. Five wrong PINs lock approvals for 15 minutes; the counter
   is stored in the same file as the PIN hash, so deleting it also deletes the PIN, and an unreadable
   record locks approvals.
-  `set-pin` refuses to run inside an agent session (`CLAUDECODE`, `AI_AGENT`, `CLAUDE_CODE_SESSION_ID`,
-  `CODEX_SESSION_ID`, `CODEX_THREAD_ID`) and changing the PIN needs the old one. The plan records how it
-  was approved (`approved_by: pin:cli` or `pin:web`).
+  `set-pin` and `set-password` refuse to run inside an agent session (`CLAUDECODE`, `AI_AGENT`,
+  `CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`, `CODEX_THREAD_ID`, `OPENBOT_AGENT_PROCESS`) and changing
+  either needs the old one (or `--reset`, which leaves a visible trail). The plan records how it was
+  approved (`approved_by: pin:cli` or `pin:web`) and with which PIN generation.
 - **Inspect before install.** `inspect_repo` clones repositories into a scratch folder and never runs
   them. It flags download-and-run commands, install scripts, credential access, obfuscation, and prompt
   injection text. It is pattern-based evidence, not a guarantee.
 - **Pinned versions.** npm and PyPI packages are pinned to the version that was reviewed.
 - **No placeholder secrets.** Missing API keys are reported, never written as dummy values.
-- **Local web UI.** Binds to `127.0.0.1`, rejects cross-site requests, and checks the Host header.
+- **Local web UI.** Binds to `127.0.0.1` and rejects cross-site requests. Anything that does not look
+  plainly local needs the web password (a salted scrypt hash, mode 0600); see "Open it from your phone".
 - **Limits.** Everything runs as your user, so an agent with unrestricted shell access can still bypass
   local controls on purpose: it can edit a plan file (the approval record is hashed, but the hash is not
   secret and can be recomputed), call the Python API, delete the PIN file and set a new PIN through a
   pseudo-terminal with the agent variables removed, or edit harness configs directly. None of these is a
-  documented one-step path, and each is a deliberate file change your harness shows you. Keep your
-  harness' own command approval prompts turned on and never tell an agent your PIN.
+  documented one-step path, and each is a deliberate file change your harness shows you. The resets
+  (`set-pin --reset`, `set-password --reset`) are traces, not barriers: a program running as you could
+  run them too, but the reset time stays visible in `where` and the web UI. Keep your harness' own
+  command approval prompts turned on and never tell an agent your PIN or password.
 - **The PIN hash can be guessed offline.** `approval_pin.json` is readable by your user, so a program
   running as you can copy it and try PINs without the 5-try limit. scrypt makes each try slow (measured: about
   0.19 s per try on one laptop core). Estimate: trying every 8-digit PIN takes about 220 core-days, so
@@ -167,7 +250,7 @@ Every config file is backed up before it changes; removing an item restores it.
 [web]
 host = "127.0.0.1"
 port = 8787
-password_file = ""          # required if you expose the UI beyond localhost
+password_file = ""          # older installs: plain-text password file; `agentloadout set-password` replaces it
 idle_shutdown_minutes = 30  # on-demand UI stops when idle
 
 [catalog]

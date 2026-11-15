@@ -369,3 +369,8 @@ ul.changes li span { color: var(--muted); font-size: 12.5px; word-break: break-w
 .dotp { width: 9px; height: 9px; border-radius: 50%; background: var(--mid); animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 .pending-item { border-top: .5px solid var(--fill2); margin-top: 12px; padding-top: 6px; }
+
+.pending.warn { background: color-mix(in srgb, #ff9f0a 18%, transparent); color: inherit; cursor: default; }
+.security h3 { margin: 18px 0 4px; font-size: 15px; }
+.security .pwform input { display: block; width: 100%; max-width: 320px; margin: 6px 0; padding: 10px 12px; border: 0;
+  border-radius: 10px; background: var(--fill); color: var(--ink); font-size: 15px; outline: none; }

@@ -24,8 +24,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-AGENT_MARKERS = ("CLAUDECODE", "AI_AGENT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_THREAD_ID")
-_SCRUB_PREFIXES = ("XDG_", "UV_", "CLAUDE_", "CODEX_", "AGENTLOADOUT_", "GITHUB_TOKEN", "VIRTUAL_ENV")
+AGENT_MARKERS = ("CLAUDECODE", "AI_AGENT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+                 "OPENBOT_AGENT_PROCESS")
+_SCRUB_PREFIXES = ("XDG_", "UV_", "CLAUDE_", "CODEX_", "OPENBOT_", "AGENTLOADOUT_", "GITHUB_TOKEN", "VIRTUAL_ENV")
 _SCRUB = set(AGENT_MARKERS) | {"CLAUDECODE", "AI_AGENT", "CODEX_HOME"}
 
 # isolate this pytest process itself before any agentloadout module is imported
@@ -137,10 +138,100 @@ class Sandbox:
     def set_pin(self, pin_value: str):
         self.py(f"from agentloadout import pin; pin.set_pin({pin_value!r})")
 
+    def approve(self, pid, pin_value="13572468"):
+        """Test stand-in for the human: approve with the PIN through the Python API (sets the PIN if needed)."""
+        self.py("from agentloadout import pin, plans\n"
+                f"if not pin.is_set(): pin.set_pin({pin_value!r})\n"
+                f"plans.approve({pid!r}, 'pin:test', pin_gen=pin.verify({pin_value!r}))")
+
+    def set_password(self, pw: str):
+        self.py(f"from agentloadout import web_password; web_password.set_password({pw!r}, None)")
+
+    def ui(self, *args, extra_env=None, drop=()):
+        return UI(self, args, extra_env, drop)
+
+
+class UI:
+    """`agentloadout ui` of a sandbox, with a raw HTTP client that can send any Host / proxy header."""
+
+    def __init__(self, sb, args=(), extra_env=None, drop=()):
+        self.sb = sb
+        self.log = sb.root / f"ui-{time.time_ns()}.log"
+        env = {k: v for k, v in {**sb.env, **(extra_env or {})}.items() if k not in drop}
+        self.proc = subprocess.Popen([sys.executable, "-m", "agentloadout.cli", "ui", *args], env=env,
+                                     stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
+        _UIS.append(self)
+        self.port = None
+        for _ in range(150):
+            time.sleep(0.1)
+            if self.proc.poll() is not None:
+                break
+            try:
+                info = json.loads((sb.al / "ui.json").read_text())
+                if info.get("pid") == self.proc.pid:
+                    self.port = info["port"]
+                    break
+            except (OSError, ValueError):
+                pass
+        assert self.port != 8787 and self.port != 8788
+
+    def output(self) -> str:
+        return self.log.read_text()
+
+    def request(self, method, path, headers=None, body=None, cookie=None, host=None):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        c.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        c.putheader("Host", host if host is not None else f"127.0.0.1:{self.port}")
+        h = dict(headers or {})
+        if cookie:
+            h["Cookie"] = cookie
+        data = b""
+        if body is not None:
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+            h.setdefault("Content-Type", "application/json")
+            h.setdefault("X-Agentloadout", "1")
+        h["Content-Length"] = str(len(data))
+        for k, v in h.items():
+            c.putheader(k, v)
+        c.endheaders(data)
+        r = c.getresponse()
+        raw = r.read()
+        out = {"status": r.status, "headers": {k.lower(): v for k, v in r.getheaders()},
+               "cookies": r.headers.get_all("Set-Cookie") or [], "text": raw.decode("utf-8", "replace")}
+        try:
+            out["json"] = json.loads(raw)
+        except ValueError:
+            out["json"] = None
+        c.close()
+        return out
+
+    def login(self, password, headers=None):
+        from urllib.parse import urlencode
+        r = self.request("POST", "/login", headers={"Content-Type": "application/x-www-form-urlencoded", **(headers or {})},
+                         body=urlencode({"password": password}).encode())
+        cookie = next((c.split(";")[0] for c in r["cookies"] if c.startswith("al_sesi_") and "Max-Age=0" not in c), None)
+        return r, cookie
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
 
 @pytest.fixture
 def sb(tmp_path):
-    return Sandbox(tmp_path)
+    box = Sandbox(tmp_path)
+    yield box
+    for ui in list(_UIS):
+        ui.stop()
+    _UIS.clear()
+
+
+_UIS = []  # every UI started by a test; stopped when the test ends
 
 
 def make_catalog(path: Path):

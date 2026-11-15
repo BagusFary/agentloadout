@@ -9,6 +9,8 @@ import pytest
 
 from conftest import ROOT
 
+from agentloadout import __version__
+
 # built from pieces so this file does not match its own search
 PATTERNS = [re.compile(p) for p in ("/" + "home/", r"ts\." + "net", "tail" + "[0-9a-f]{6}")]
 
@@ -18,8 +20,8 @@ def test_sdist_and_wheel_are_clean(sb):
     out = sb.root / "dist"
     r = subprocess.run(["uv", "build", "--out-dir", str(out), str(ROOT)], env=sb.env, capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stderr
-    sdist = next(out.glob("agentloadout-0.2.0.tar.gz"))
-    wheel = next(out.glob("agentloadout-0.2.0-*.whl"))
+    sdist = next(out.glob(f"agentloadout-{__version__}.tar.gz"))
+    wheel = next(out.glob(f"agentloadout-{__version__}-*.whl"))
 
     files = {}
     with tarfile.open(sdist) as t:

@@ -159,3 +159,20 @@ def _data(res):
     if sc is not None:
         return sc.get("result", sc) if isinstance(sc, dict) and set(sc) == {"result"} else sc
     return json.loads(res.content[0].text)
+
+
+# ------------------------------------------------------------------ setup offers the web password (BRIEF-03)
+def test_setup_in_terminal_offers_the_web_password(sb):
+    (sb.home / ".cursor").mkdir()
+    pw = "kata-sandi-setup-1"
+    rc, out = sb.pty("setup", "--to", "cursor", answers=[("Lanjutkan?", "y"), ("skill panduan", "y"), ("Tempel token", ""),
+                                                        ("Pasang password web", "y"), ("Password baru", pw), ("Ulangi", pw)])
+    assert rc == 0, out
+    assert (sb.al / "web_password.json").exists() and pw not in out
+
+
+def test_setup_with_yes_only_prints_the_password_hint(sb):
+    (sb.home / ".cursor").mkdir()
+    r = sb.cli("setup", "--yes", "--to", "cursor")
+    assert r.returncode == 0 and "agentloadout set-password" in r.stdout
+    assert not (sb.al / "web_password.json").exists()

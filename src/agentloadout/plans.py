@@ -17,9 +17,11 @@ import secrets
 import subprocess
 from pathlib import Path
 
-from . import db, harness, paths
+from . import db, harness, paths, pin
 
 APPROVAL_TTL = dt.timedelta(hours=1)
+AGENT_REPORT_TTL = dt.timedelta(hours=1)  # OpenBot steps not reported within this become "incomplete"
+# statuses: pending | approved | rejected | revoked | applied | failed | partial | awaiting_agent | incomplete
 MCP_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 
 
@@ -41,6 +43,8 @@ def _hash(plan: dict) -> str:
 def _approval_hash(plan: dict) -> str:
     core = {"id": plan["id"], "hash": plan["hash"], "status": "approved",
             "approved_at": plan.get("approved_at"), "approved_by": plan.get("approved_by")}
+    if "pin_gen" in plan:  # plans approved before v0.3.0 have no pin_gen
+        core["pin_gen"] = plan["pin_gen"]
     return hashlib.sha256(json.dumps(core, sort_keys=True).encode()).hexdigest()
 
 
@@ -48,7 +52,17 @@ def load(plan_id: str) -> dict:
     f = _file(plan_id)
     if not f.exists():
         raise ValueError(f"rencana {plan_id} tidak ada")
-    return json.loads(f.read_text())
+    return _expire(json.loads(f.read_text()))
+
+
+def _expire(p: dict) -> dict:
+    """awaiting_agent becomes incomplete when the OpenBot agent did not report within AGENT_REPORT_TTL."""
+    if p.get("status") == "awaiting_agent" and p.get("applied_at"):
+        if _now() - dt.datetime.fromisoformat(p["applied_at"]) > AGENT_REPORT_TTL:
+            p["status"] = "incomplete"
+            p["incomplete_at"] = _now().isoformat(timespec="seconds")
+            save(p)
+    return p
 
 
 def save(plan: dict):
@@ -60,7 +74,7 @@ def save(plan: dict):
 def list_plans(status: str | None = None) -> list[dict]:
     out = []
     for f in sorted(paths.plans_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        p = json.loads(f.read_text())
+        p = _expire(json.loads(f.read_text()))
         if not status or p["status"] == status:
             out.append(p)
     return out
@@ -187,16 +201,29 @@ def create(item_id: str, targets: list[str], action: str = "install", skill_path
 
 
 # --------------------------------------------------------------------------- approve / reject
-def approve(plan_id: str, by: str) -> dict:
+def approve(plan_id: str, by: str, pin_gen: int | None = None) -> dict:
+    """Mark a plan approved. `pin_gen` is the PIN gen the human's PIN matched (pin.verify's return value);
+    apply() refuses the plan once the PIN was changed or reset."""
     p = load(plan_id)
     if p["status"] != "pending":
         raise ValueError(f"rencana berstatus {p['status']}, tidak bisa disetujui")
     if _hash(p) != p["hash"]:
         raise ValueError("isi rencana berubah setelah dibuat; buat rencana baru")
-    p.update(status="approved", approved_at=_now().isoformat(timespec="seconds"), approved_by=by)
+    p.update(status="approved", approved_at=_now().isoformat(timespec="seconds"), approved_by=by,
+             pin_gen=pin_gen if pin_gen is not None else pin.current_gen())
     p["approval_hash"] = _approval_hash(p)
     save(p)
     return p
+
+
+def revoke_approved(reason: str) -> list[str]:
+    """Approved but not yet applied plans become 'revoked' (after a PIN change or reset)."""
+    out = []
+    for p in list_plans("approved"):
+        p.update(status="revoked", revoked_at=_now().isoformat(timespec="seconds"), revoked_reason=reason)
+        save(p)
+        out.append(p["id"])
+    return out
 
 
 def reject(plan_id: str, by: str) -> dict:
@@ -219,6 +246,10 @@ def apply(plan_id: str) -> dict:
     if p.get("approval_hash") != _approval_hash(p):
         raise PermissionError("catatan persetujuan rencana tidak valid (file rencana diubah?); "
                               f"minta pengguna menyetujui ulang: agentloadout approve {plan_id}")
+    current = pin.current_gen()
+    if current is None or p.get("pin_gen", 0) != current:
+        raise PermissionError("PIN persetujuan sudah diganti, direset, atau tidak ada sejak rencana ini disetujui; "
+                              f"minta pengguna menyetujui ulang: agentloadout approve {plan_id}")
 
     results, ok = [], True
     if p["kind"] == "skill":
@@ -230,7 +261,7 @@ def apply(plan_id: str) -> dict:
     for ch in p["changes"]:
         try:
             if ch["harness"] == "openbot":
-                results.append({**ch, "result": "perlu agen OpenBot", "ok": None})
+                results.append({**ch, "result": "menunggu agen OpenBot", "ok": None})
                 continue
             if p["kind"] == "mcp":
                 a = harness.get(ch["harness"])
@@ -246,9 +277,49 @@ def apply(plan_id: str) -> dict:
         except (harness.HarnessError, OSError, subprocess.SubprocessError) as e:
             ok = False
             results.append({**ch, "ok": False, "error": str(e)})
-    p.update(status="applied" if ok else "failed", applied_at=_now().isoformat(timespec="seconds"), results=results)
+    waiting = any(r.get("ok") is None for r in results)
+    p.update(status="failed" if not ok else ("awaiting_agent" if waiting else "applied"),
+             applied_at=_now().isoformat(timespec="seconds"), results=results)
+    if waiting and ok:
+        p["next"] = AGENT_NEXT
     save(p)
     _record(p, ok)
+    return p
+
+
+AGENT_NEXT = ("Langkah OpenBot belum dikerjakan. Agen OpenBot: jalankan agent_instructions di hasil (openbot.save_mcp_server / "
+              "openbot.remove_mcp_server, atau create_skill + install_local_skill), periksa dengan openbot.list_mcp_servers, "
+              "lalu laporkan dengan tool report_agent_step(plan_id, harness='openbot', ok, detail). "
+              "Tanpa laporan dalam 1 jam, status rencana menjadi 'incomplete'.")
+
+
+def _final_status(results) -> str:
+    oks = [r.get("ok") for r in results]
+    if any(o is None for o in oks):
+        return "awaiting_agent"
+    if all(oks):
+        return "applied"
+    return "partial" if any(oks) else "failed"
+
+
+def report_agent_step(plan_id: str, harness_id: str, ok: bool, detail: str = "", by: str = "agent") -> dict:
+    """Bookkeeping by the agent that ran a delegated step (OpenBot). It is not an approval: the plan was
+    already approved and applied; this only records whether the agent's own step worked."""
+    p = load(plan_id)
+    if p["status"] not in ("awaiting_agent", "incomplete"):
+        raise ValueError(f"rencana berstatus {p['status']}; tidak ada langkah agen yang ditunggu")
+    hits = [r for r in p.get("results", []) if r.get("harness") == harness_id and r.get("ok") is None]
+    if not hits:
+        raise ValueError(f"tidak ada langkah {harness_id} yang menunggu laporan di rencana ini")
+    now = _now().isoformat(timespec="seconds")
+    for r in hits:
+        r.update(ok=bool(ok), result="dilaporkan agen: " + ("berhasil" if ok else "gagal"),
+                 detail=str(detail)[:500], reported_at=now, reported_by=by)
+    p["status"] = _final_status(p["results"])
+    if p["status"] != "awaiting_agent":
+        p.pop("next", None)
+    save(p)
+    _record(p, True)
     return p
 
 
