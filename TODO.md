@@ -43,3 +43,12 @@ Sisa:
 - Refresh katalog di proses terpisah dengan kunci PID; tanpa token: README dari raw, item "belum diperiksa" saat kuota habis, simpan per batch.
 - Uninstall hanya melepas skill panduan yang dipasang setup.
 - Tes pytest (`uv run pytest`).
+
+## v0.3.0: password web, lupa password/PIN, alur instal (15 Nov 2026)
+- `agentloadout set-password [--reset|--off]`: hash scrypt di `web_password.json`; menang atas `password_file` lama.
+- Gerbang akses luar (`request_scope`): selain lokal murni wajib password; header identitas Tailscale tidak memberi hak; Funnel hanya-lihat; `/api/install` ikut gerbang.
+- Cookie per instance (`al_sesi_<id>`), `Secure` hanya lewat HTTPS; keluar dari semua perangkat; halaman Keamanan.
+- `set-pin --reset`; PIN punya `gen`/`set_by`/`reset_at`; persetujuan lama dicabut; banner "PIN direset" 7 hari.
+- OpenBot: `setup` di shell OpenBot = `--to openbot` (instruksi `openbot.save_mcp_server`); status `awaiting_agent` + tool `report_agent_step`.
+- Port: `instance_id`, `ui.json`, pindah otomatis bila port terpakai (kecuali `--port`/`AGENTLOADOUT_PORT`).
+- Backlog: token di URL lokal (K1-B), PIN untuk `/api/install`, uji Windows/macOS, Safari + cookie Secure, header Cloudflare Tunnel.

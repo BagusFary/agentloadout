@@ -10,7 +10,7 @@ Example config.toml:
     [web]
     host = "127.0.0.1"
     port = 8787
-    password_file = ""            # set to require a password (needed when exposed beyond localhost)
+    password_file = ""            # older installs only; use `agentloadout set-password` (stored as a hash)
     idle_shutdown_minutes = 30    # on-demand UI stops after this idle time (0 = never)
 
     [catalog]

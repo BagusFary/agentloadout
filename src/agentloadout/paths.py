@@ -65,3 +65,38 @@ def work_dir() -> Path:
     p = home() / "work"
     p.mkdir(exist_ok=True)
     return p
+
+
+def instance_id() -> str:
+    """Random id of this data folder (one Agent Loadout instance). Tells instances on different ports apart.
+    Created atomically (write a temp file, then link it into place) so concurrent first starts agree."""
+    import secrets
+    f = home() / "instance_id"
+    if not f.exists():
+        tmp = home() / f"instance_id.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(secrets.token_hex(8) + "\n")
+        try:
+            os.link(tmp, f)
+        except FileExistsError:
+            pass
+        except OSError:  # file systems without hard links
+            if not f.exists():
+                os.replace(tmp, f)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return f.read_text().strip()
+
+
+def write_private(f: Path, text: str):
+    """Write `text` to `f` atomically with mode 0600 (temp file, fsync, replace)."""
+    tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    if os.name != "nt":
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, f)

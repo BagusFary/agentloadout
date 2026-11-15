@@ -3,14 +3,15 @@
   agentloadout setup [--to claude-code,codex,...] [--yes] [--token-from-env]
                                                    register the Agent Loadout MCP server in your harnesses
   agentloadout uninstall [--yes]                   remove it again (your config backups stay)
-  agentloadout set-pin                             set or change the approval PIN (human, own terminal)
-  agentloadout ui [--on-demand]                    local web catalog (http://127.0.0.1:8787)
+  agentloadout set-pin [--reset]                   set, change or reset the approval PIN (human, own terminal)
+  agentloadout set-password [--reset | --off]      web UI password, needed to open it from a phone (human)
+  agentloadout ui [--on-demand] [--port N]         local web catalog (http://127.0.0.1:8787)
   agentloadout plans | approve <id> | reject <id>  review install plans made by agents
   agentloadout refresh | backup | restore [file] | check-updates | where | harnesses
   agentloadout mcp                                 MCP server over stdio (harnesses run this)
 
 Install from GitHub (there is no PyPI release; the PyPI package named `agentloadout` is not ours):
-  uv tool install "git+https://github.com/BagusFary/agentloadout@v0.2.0"
+  uv tool install "git+https://github.com/BagusFary/agentloadout@v0.3.0"
   "$(uv tool dir --bin)/agentloadout" setup --yes
 """
 from __future__ import annotations
@@ -118,15 +119,23 @@ def cmd_setup(a):
     except SetupError as e:
         print(str(e), file=sys.stderr)
         return 1
-    found = [h for h in harness.detected() if h.id != "openbot"]
+    found = harness.detected()
     print("Harness terdeteksi:", ", ".join(h.name for h in found) or "(tidak ada)")
+    in_openbot = bool(os.environ.get("OPENBOT_AGENT_PROCESS"))
     try:
-        chosen = [harness.get(x.strip()) for x in a.to.split(",")] if a.to else found
+        if a.to:
+            chosen = [harness.get(x.strip()) for x in a.to.split(",")]
+        elif in_openbot:
+            # run by an OpenBot agent: register in OpenBot only, never in other harnesses on this computer
+            chosen = [harness.get("openbot")]
+            print("Dijalankan oleh agen OpenBot: hanya OpenBot (pakai --to untuk harness lain).")
+        else:
+            chosen = found
     except harness.HarnessError as e:
         print(str(e), file=sys.stderr)
         return 2
     if not chosen:
-        print("Tidak ada harness yang didukung. Pasang Claude Code, Codex, Cursor, Gemini CLI, atau OpenCode dulu.")
+        print("Tidak ada harness yang didukung. Pasang Claude Code, Codex, Cursor, Gemini CLI, OpenCode, atau OpenBot dulu.")
         return 1
     print(f"\nMCP '{MCP_NAME}' akan didaftarkan ke: {', '.join(h.name for h in chosen)}")
     print(f"  perintah: {spec['command']} {' '.join(spec['args'])}")
@@ -134,6 +143,9 @@ def cmd_setup(a):
         print("Dibatalkan.")
         return 1
     for h in chosen:
+        if h.id == "openbot":
+            _openbot_setup(h, spec)
+            continue
         try:
             ch = h.plan_add(MCP_NAME, spec)
             bk = h.apply(ch, MCP_NAME, spec)
@@ -152,8 +164,7 @@ def cmd_setup(a):
         if tok:
             os.environ["GITHUB_TOKEN"] = tok
             print(f"  disimpan di {_save_token_from_env()}")
-    if any(h.id == "openbot" for h in harness.detected()):
-        print("\nOpenBot terdeteksi: tambahkan MCP lewat Server settings > MCP dengan perintah di atas.")
+    _offer_password(a)
     print("\nSelesai. Buka ulang harness-mu, lalu minta agen: \"cari MCP untuk postgres di Agent Loadout\".")
     if not pin.is_set():
         print("Sebelum persetujuan pertama, PENGGUNA (bukan agen) menjalankan di terminalnya sendiri:\n"
@@ -165,6 +176,40 @@ def cmd_setup(a):
               "lalu item yang belum diperiksa dilengkapi bertahap (batas 60 request/jam). Lihat README.")
     print(f"Data: {paths.home()}   Web lokal: agentloadout ui")
     return 0
+
+
+def _guide_src():
+    from pathlib import Path
+    return Path(__file__).parent / "skill" / "agentloadout"
+
+
+def _openbot_setup(h, spec):
+    """OpenBot keeps MCP servers in its own app: an OpenBot agent registers them with its tools."""
+    from . import harness
+    step = h.agent_instructions(harness.Change("openbot", "add", "agent", ""), MCP_NAME, spec)
+    step.pop("note", None)
+    print("  ℹ OpenBot: MCP didaftarkan oleh agen OpenBot, bukan oleh perintah ini. Agen OpenBot memanggil:")
+    print("    " + json.dumps(step, ensure_ascii=False))
+    print(f"    skill panduan: openbot.create_skill dengan sourcePath {_guide_src()}, lalu openbot.install_local_skill")
+    print("    lalu periksa dengan openbot.list_mcp_servers. Env/API key: minta pengguna mengisinya di pengaturan "
+          "MCP OpenBot, jangan lewat chat.")
+
+
+def _offer_password(a):
+    from . import web_password
+    if web_password.enabled():
+        return
+    if not a.yes and sys.stdin.isatty() and not pin_markers():
+        if _ask("\nPasang password web sekarang? (wajib untuk membuka web dari HP atau lewat tunnel)", False):
+            cmd_set_password(argparse.Namespace(reset=False, off=False))
+        return
+    print("\nWeb hanya bisa dibuka di komputer ini sampai PENGGUNA memasang password di terminalnya sendiri:\n"
+          "  agentloadout set-password")
+
+
+def pin_markers():
+    from . import pin
+    return pin.agent_markers()
 
 
 def _is_our_guide(folder) -> bool:
@@ -180,9 +225,8 @@ def _is_our_guide(folder) -> bool:
 def _install_guide_skill(chosen, yes):
     """Install the bundled `agentloadout` skill so agents know the safe workflow.
     A folder of the same name that setup did not install (no marker) belongs to the user and is left alone."""
-    from pathlib import Path
     from . import harness
-    src = Path(__file__).parent / "skill" / "agentloadout"
+    src = _guide_src()
     locs = harness.skill_locations_for([h.id for h in chosen])
     if not locs or not _ask("Pasang juga skill panduan 'agentloadout' untuk agen?", yes):
         return
@@ -204,8 +248,14 @@ def cmd_uninstall(a):
     rc = _need_yes(a, "uninstall")
     if rc:
         return rc
-    targets = [h for h in harness.detected() if h.id != "openbot" and MCP_NAME in h.list_mcp()]
-    guides = [loc for loc, d in harness.SKILL_LOCATIONS.items() if _is_our_guide(d["dir"] / MCP_NAME)]
+    in_openbot = bool(os.environ.get("OPENBOT_AGENT_PROCESS"))
+    openbot = in_openbot or harness.get("openbot").detect()
+    targets = [] if in_openbot else [h for h in harness.detected() if h.id != "openbot" and MCP_NAME in h.list_mcp()]
+    guides = [] if in_openbot else [loc for loc, d in harness.SKILL_LOCATIONS.items() if _is_our_guide(d["dir"] / MCP_NAME)]
+    if openbot:
+        print("ℹ OpenBot: MCP dilepas oleh agen OpenBot. Agen OpenBot memanggil:\n    "
+              + json.dumps({"tool": "openbot.remove_mcp_server", "arguments": {"name": MCP_NAME}})
+              + "\n    dan melepas skill lokal 'agentloadout' bila dipasang, lalu periksa dengan openbot.list_mcp_servers.")
     if not targets and not guides:
         print("MCP agentloadout tidak terdaftar di harness mana pun, dan skill panduan tidak terpasang.")
     else:
@@ -271,11 +321,11 @@ def cmd_approve(a, approve=True):
               "di terminalnya sendiri, lalu setujui lagi.", file=sys.stderr)
         return 2
     try:
-        pin.verify(getpass.getpass("\nPIN persetujuan (Enter kosong = batal): "))
+        gen = pin.verify(getpass.getpass("\nPIN persetujuan (Enter kosong = batal): "))
     except pin.PinError as e:
         print(f"{e} Ditolak.", file=sys.stderr)
         return 2
-    p = plans.approve(a.plan_id, "pin:cli")
+    p = plans.approve(a.plan_id, "pin:cli", pin_gen=gen)
     print(f"Rencana {p['id']}: {p['status']}. Agen sekarang boleh menjalankan apply_plan (berlaku 1 jam).")
     if a.apply:
         p = plans.apply(a.plan_id)
@@ -283,18 +333,36 @@ def cmd_approve(a, approve=True):
     return 0
 
 
-def cmd_set_pin(a):
+def _human_terminal(what: str) -> int:
+    """Secrets are set by the human in their own terminal: refuse inside an agent or without a terminal."""
     from . import pin
     found = pin.agent_markers()
     if found:
-        print("set-pin ditolak: perintah ini berjalan di dalam agen (" + ", ".join(found) + ").\n"
-              "PIN hanya boleh dibuat oleh pengguna di terminalnya sendiri, di luar agen.", file=sys.stderr)
+        print(f"{what} ditolak: perintah ini berjalan di dalam agen (" + ", ".join(found) + ").\n"
+              "Hanya pengguna yang boleh menjalankannya, di terminalnya sendiri di luar agen.", file=sys.stderr)
         return 2
     if not sys.stdin.isatty():
-        print("set-pin harus dijalankan di terminal interaktif.", file=sys.stderr)
+        print(f"{what} harus dijalankan di terminal interaktif.", file=sys.stderr)
         return 2
+    return 0
+
+
+def cmd_set_pin(a):
+    from . import pin, plans
+    rc = _human_terminal("set-pin")
+    if rc:
+        return rc
+    changed = False
     try:
-        old = getpass.getpass("PIN lama: ") if pin.is_set() else None
+        if a.reset:
+            print("Reset PIN: dipakai kalau PIN lupa atau terkunci. Rencana yang sudah disetujui tapi belum dipasang\n"
+                  "akan dicabut, dan waktu reset tercatat (tampil di web dan `agentloadout where`).")
+            if input("Ketik RESET untuk lanjut: ").strip() != "RESET":
+                print("Dibatalkan.", file=sys.stderr)
+                return 1
+            old = None
+        else:
+            old = getpass.getpass("PIN lama: ") if pin.is_set() else None
         new = getpass.getpass(f"PIN baru ({pin.MIN_DIGITS}+ digit): ")
         if not pin.valid_format(new):
             print(f"PIN harus {pin.MIN_DIGITS}–{pin.MAX_DIGITS} digit angka. Tidak diubah.", file=sys.stderr)
@@ -302,14 +370,69 @@ def cmd_set_pin(a):
         if getpass.getpass("Ulangi PIN baru: ") != new:
             print("PIN tidak sama. Tidak diubah.", file=sys.stderr)
             return 2
-        pin.set_pin(new, old)
+        if a.reset:
+            pin.reset_pin(new)
+        else:
+            changed = pin.is_set()
+            pin.set_pin(new, old)
     except pin.PinError as e:
-        print(f"{e} Tidak diubah.", file=sys.stderr)
+        hint = " Lupa PIN? Jalankan: agentloadout set-pin --reset" if not a.reset else ""
+        print(f"{e} Tidak diubah.{hint}", file=sys.stderr)
         return 2
     except (EOFError, KeyboardInterrupt):
         print("\nDibatalkan.", file=sys.stderr)
         return 1
-    print(f"PIN persetujuan disimpan (hash scrypt, {pin.pin_file()}). Jangan bagikan PIN ini ke agen.")
+    revoked = plans.revoke_approved("PIN direset" if a.reset else "PIN diganti") if (a.reset or changed) else []
+    print(f"PIN persetujuan {'direset' if a.reset else 'disimpan'} (hash scrypt, {pin.pin_file()}). Jangan bagikan PIN ini ke agen.")
+    if revoked:
+        print(f"Rencana yang dicabut (perlu disetujui ulang): {', '.join(revoked)}")
+    return 0
+
+
+def cmd_set_password(a):
+    from . import web_password as wp
+    rc = _human_terminal("set-password")
+    if rc:
+        return rc
+    src = wp.source()
+    try:
+        if a.off:
+            if src != "hashed":
+                print("Tidak ada password ber-hash." + (f" Password sekarang dari file teks {wp.legacy_file()}: hapus baris "
+                                                      "password_file di config.toml untuk mematikannya." if src == "legacy_file" else ""),
+                      file=sys.stderr)
+                return 2
+            wp.turn_off(getpass.getpass("Password lama: "))
+            print("Password web dimatikan. Akses dari luar komputer ini sekarang diblokir sampai password dipasang lagi.")
+            return 0
+        if a.reset:
+            print("Reset password web: dipakai kalau password lupa. Semua perangkat akan keluar.")
+            old = None
+        else:
+            old = getpass.getpass("Password lama: ") if src != "off" else None
+        new = getpass.getpass(f"Password baru ({wp.MIN_LEN}–{wp.MAX_LEN} karakter): ")
+        if not wp.valid_format(new):
+            print(f"Password harus {wp.MIN_LEN}–{wp.MAX_LEN} karakter. Tidak diubah.", file=sys.stderr)
+            return 2
+        if getpass.getpass("Ulangi password baru: ") != new:
+            print("Password tidak sama. Tidak diubah.", file=sys.stderr)
+            return 2
+        if a.reset:
+            wp.reset_password(new)
+        else:
+            wp.set_password(new, old)
+    except wp.PasswordError as e:
+        hint = " Lupa password? Jalankan: agentloadout set-password --reset" if not a.reset else ""
+        print(f"{e} Tidak diubah.{hint}", file=sys.stderr)
+        return 2
+    except (EOFError, KeyboardInterrupt):
+        print("\nDibatalkan.", file=sys.stderr)
+        return 1
+    print(f"Password web {'direset' if a.reset else 'disimpan'} sebagai hash scrypt ({wp.record_file()}). "
+          "Semua sesi lama keluar; login ulang di browser.")
+    if wp.legacy_file():
+        print(f"Catatan: password_file di config ({wp.legacy_file()}) sekarang diabaikan. Hapus file teks polos itu "
+              "dan baris password_file di config.toml.")
     return 0
 
 
@@ -323,7 +446,12 @@ def main(argv=None):
     p.add_argument("--token-from-env", action="store_true", help="save $GITHUB_TOKEN to the data folder (0600)")
     p = sub.add_parser("uninstall", help="remove the MCP server and guide skill from your harnesses")
     p.add_argument("--yes", "-y", action="store_true")
-    sub.add_parser("set-pin", help="set or change the approval PIN (in your own terminal, not through an agent)")
+    p = sub.add_parser("set-pin", help="set or change the approval PIN (in your own terminal, not through an agent)")
+    p.add_argument("--reset", action="store_true", help="forgot the PIN: set a new one without the old (type RESET)")
+    p = sub.add_parser("set-password", help="set the web UI password (needed to open the web UI from a phone)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--reset", action="store_true", help="forgot the password: set a new one, log out every device")
+    g.add_argument("--off", action="store_true", help="remove the password (only local access works afterwards)")
     p = sub.add_parser("ui", help="start the local web catalog")
     p.add_argument("--host")
     p.add_argument("--port", type=int)
@@ -352,6 +480,8 @@ def main(argv=None):
         sys.exit(cmd_uninstall(a))
     if a.cmd == "set-pin":
         sys.exit(cmd_set_pin(a))
+    if a.cmd == "set-password":
+        sys.exit(cmd_set_password(a))
     if a.cmd == "ui":
         from .web import server
         server.main(a.host, a.port, on_demand=a.on_demand)
@@ -384,10 +514,25 @@ def main(argv=None):
         from . import updates
         updates.main()
     elif a.cmd == "where":
-        from . import config, paths, pin
+        from . import config, paths, pin, web_password
+        from .web import server as web
         print(f"data    : {paths.home()}\ncatalog : {paths.db_path()}\nbackups : {paths.backup_dir()}\nconfig  : {paths.config_file()}")
         print(f"github token: {'set' if config.github_token() else 'not set (optional, raises API limit)'}")
-        print(f"approval PIN: {'set' if pin.is_set() else 'not set (run `agentloadout set-pin` yourself)'}")
+        st = pin.status()
+        if not st["set"]:
+            print("approval PIN: not set (run `agentloadout set-pin` yourself)")
+        elif st.get("invalid"):
+            print("approval PIN: record invalid, approvals locked (run `agentloadout set-pin --reset`)")
+        else:
+            print(f"approval PIN: set {st.get('set_at')} by {st.get('set_by') or '?'}" + (" (locked)" if st.get("locked") else ""))
+            if st.get("reset_at"):
+                print(f"              PIN direset pada {st['reset_at']}")
+        pw = web_password.status()
+        print("web password: " + {"hashed": f"set (hash) {pw.get('set_at')}" + (f", direset {pw['reset_at']}" if pw.get("reset_at") else ""),
+                                  "legacy_file": "set (plain-text password_file; run `agentloadout set-password` to hash it)",
+                                  "off": "not set (web only on this computer; `agentloadout set-password`)"}[pw["source"]])
+        ui = web.read_ui()
+        print(f"web UI  : http://{ui['host']}:{ui['port']}/ (pid {ui['pid']})" if ui else "web UI  : not running (`agentloadout ui`)")
 
 
 if __name__ == "__main__":

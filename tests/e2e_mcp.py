@@ -24,7 +24,7 @@ T = Path(tempfile.mkdtemp(prefix="al-e2e-"))
 (T / ".cursor" / "mcp.json").write_text('{"mcpServers": {"existing": {"command": "x"}}}\n')
 ENV = {**os.environ, "HOME": str(T), "AGENTLOADOUT_HOME": str(T / "al"), "AGENTLOADOUT_DB": str(T / "al" / "catalog.db"),
        "XDG_CONFIG_HOME": str(T / ".config"), "XDG_DATA_HOME": str(T / ".local/share")}
-for _k in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "GITHUB_TOKEN", "GITHUB_TOKEN_FILE", "AGENTLOADOUT_PORT"):
+for _k in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "GITHUB_TOKEN", "GITHUB_TOKEN_FILE", "AGENTLOADOUT_PORT", "OPENBOT_AGENT_PROCESS"):
     ENV.pop(_k, None)
 (T / "al").mkdir()
 shutil.copy(SRC_DB, T / "al" / "catalog.db")
@@ -34,9 +34,15 @@ def cli(*args):
     return subprocess.run([sys.executable, "-m", "agentloadout.cli", *args], env=ENV, capture_output=True, text=True, timeout=120)
 
 
+TEST_PIN = "86420975"  # throwaway HOME only
+
+
 def approve(plan_id):
-    """Test-only stand-in for the human: approve through the Python API in the throwaway HOME."""
-    code = f"from agentloadout import plans; print(plans.approve({plan_id!r}, 'pin:test')['status'])"
+    """Test-only stand-in for the human: approve with the PIN through the Python API in the throwaway HOME.
+    Without a PIN nothing may be applied, so the first call sets one there."""
+    code = ("from agentloadout import pin, plans\n"
+            f"if not pin.is_set(): pin.set_pin({TEST_PIN!r})\n"
+            f"print(plans.approve({plan_id!r}, 'pin:test', pin_gen=pin.verify({TEST_PIN!r}))['status'])")
     return subprocess.run([sys.executable, "-c", code], env=ENV, capture_output=True, text=True, timeout=60)
 
 
