@@ -483,6 +483,7 @@ function showStatus(j) {
   note.hidden = !msgs.length;
   note.innerHTML = msgs.map(([cls, m]) => `<p class="${cls}">${m}</p>`).join("");
   note.querySelectorAll("[data-open-settings]").forEach((b) => (b.onclick = openSettings));
+  showUpgrade(j);
   const s = j.summary;
   $("#summary-line").textContent = s && s.at ? `Katalog diperbarui ${when(s.at)} · ${s.items ?? j.items} item${s.seconds ? ` · ${Math.round(s.seconds / 60) || 1} menit` : ""}` : "";
   const btn = $("#refresh-now");
@@ -498,6 +499,26 @@ function showStatus(j) {
   wasRunning = running;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(pollStatus, running ? 4000 : 20000);
+}
+
+// new Agent Loadout release (from the server's cached check; no button: upgrades run in a terminal, K8)
+function showUpgrade(j) {
+  const box = $("#upnote");
+  const u = j.update;
+  const parts = [];
+  if (j.stale) parts.push(`<p class="warn">${esc(j.stale)}</p>`);
+  if (u && localStorage.getItem("al-hide-upgrade") !== u.latest) {
+    parts.push(`<div class="upg"><p class="info"><b>Versi baru tersedia: v${esc(u.latest)}</b> (sekarang v${esc(u.current)}).
+      Jalankan di terminal laptop: <code class="cmd">${esc(u.command)}</code>
+      <button class="pill" data-copy>Salin</button> <button class="pill" data-hide>Tutup</button></p>
+      ${u.notes ? `<details><summary>Apa yang berubah</summary><pre class="notes">${esc(u.notes)}</pre><small>${esc(u.notes_label)}</small></details>` : ""}</div>`);
+  }
+  box.hidden = !parts.length;
+  box.innerHTML = parts.join("");
+  const c = box.querySelector("[data-copy]");
+  if (c) c.onclick = async () => { try { await navigator.clipboard.writeText(u.command); toast("Perintah disalin"); } catch { toast(u.command); } };
+  const h = box.querySelector("[data-hide]");
+  if (h) h.onclick = () => { localStorage.setItem("al-hide-upgrade", u.latest); box.hidden = true; };
 }
 
 async function pollStatus() {

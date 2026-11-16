@@ -420,7 +420,10 @@ class Handler(BaseHTTPRequestHandler):
         LAST_REQUEST[0] = time.time()
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self.send_json(200, {"ok": True, "instance": INSTANCE[0] or paths.instance_id()})
+            from .. import __version__, selfupdate
+            stale = selfupdate.stale_process_note()
+            return self.send_json(200, {"ok": True, "instance": INSTANCE[0] or paths.instance_id(), "version": __version__,
+                                        **({"stale": stale} if stale else {})})
         if not self.gate(path):
             return
         if path == "/login":
@@ -441,6 +444,9 @@ class Handler(BaseHTTPRequestHandler):
             res = status_payload(con)
             con.close()
             res["actions_allowed"] = self.actions_allowed()
+            from .. import selfupdate
+            res["update"] = selfupdate.notice()      # cache only, no network
+            res["stale"] = selfupdate.stale_process_note()
             return self.send_json(200, res)
         if path == "/api/settings/token":
             why = self.token_allowed()
@@ -625,7 +631,9 @@ def main(host=None, port=None, on_demand=False):
         return
     if note:
         print(note, file=sys.stderr, flush=True)
+    from .. import __version__
     paths.write_private(ui_file(), json.dumps({"host": shown, "port": port, "pid": os.getpid(), "instance": INSTANCE[0],
+                                               "version": __version__,
                                                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}))
     LAST_REQUEST[0] = time.time()
     idle = int(w.get("idle_shutdown_minutes") or 0) * 60

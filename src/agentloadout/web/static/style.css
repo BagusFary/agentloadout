@@ -388,3 +388,7 @@ ul.changes li span { color: var(--muted); font-size: 12.5px; word-break: break-w
 .security .sec-h { margin-top: 28px; }
 .security .tokform input { display: block; width: 100%; max-width: 420px; margin: 6px 0; padding: 10px 12px; border: 0;
   border-radius: 10px; background: var(--fill); color: var(--ink); font-size: 15px; outline: none; }
+.cnote p.info { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.cnote code.cmd { padding: 2px 6px; border-radius: 6px; background: var(--fill); }
+.cnote details { margin: 4px 12px 8px; font-size: 13px; }
+.cnote pre.notes { white-space: pre-wrap; max-height: 260px; overflow: auto; margin: 6px 0; font-size: 12.5px; }

@@ -136,9 +136,9 @@ class Sandbox:
             raise AssertionError(f"python failed: {r.stderr}")
         return r
 
-    def pty(self, *args, answers=(), extra_env=None, timeout=60):
+    def pty(self, *args, answers=(), extra_env=None, timeout=60, exe=None):
         """Run the CLI on a pseudo-terminal; answers = [(prompt substring, text to type), ...]."""
-        argv = [sys.executable, "-m", "agentloadout.cli", *args]
+        argv = [exe, *args] if exe else [sys.executable, "-m", "agentloadout.cli", *args]
         env = {**self.env, **(extra_env or {})}
         pid, fd = pty.fork()
         if pid == 0:  # child

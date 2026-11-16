@@ -16,7 +16,8 @@ def write_port(sb, port):
 def test_health_reports_the_instance_and_ui_json_is_written(sb):
     web = sb.ui()
     iid = (sb.al / "instance_id").read_text().strip()
-    assert web.request("GET", "/api/health")["json"] == {"ok": True, "instance": iid}
+    from agentloadout import __version__
+    assert web.request("GET", "/api/health")["json"] == {"ok": True, "instance": iid, "version": __version__}
     info = json.loads((sb.al / "ui.json").read_text())
     assert info["port"] == web.port and info["pid"] == web.proc.pid and info["instance"] == iid
     web.stop()

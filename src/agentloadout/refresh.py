@@ -179,6 +179,11 @@ def run_locked(fd: int | None = None, source: str | None = None, backup: bool = 
         from . import collector
         collector.main()
         _write_state(finished_at=now_iso(), ok=True)
+        try:  # newer Agent Loadout release? at most once per 24 h, silent on failure (cache read by web/where/MCP)
+            from . import selfupdate
+            selfupdate.check()
+        except Exception:  # noqa: BLE001
+            pass
         return 0
     except BaseException as e:  # noqa: BLE001  (SIGTERM / Ctrl-C too: record why it stopped)
         msg = str(e) or type(e).__name__

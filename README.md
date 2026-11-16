@@ -130,9 +130,44 @@ agentloadout approve <id>  # approve (interactive terminal + PIN)
 agentloadout set-pin       # set or change the approval PIN       (--reset: forgot it)
 agentloadout set-password  # web password, needed for your phone   (--reset: forgot it, --off: remove)
 agentloadout set-token     # GitHub token, hidden input              (--test, --clear, --from-env)
+agentloadout upgrade       # upgrade Agent Loadout itself            (--check, --to vX.Y.Z, --pre)
 agentloadout harnesses     # detected harnesses and config paths
 agentloadout where         # data, config and backup folders
 ```
+
+## Upgrade
+
+```bash
+agentloadout upgrade --check   # is there a newer release? (no changes)
+agentloadout upgrade           # install the newest release tag
+```
+
+`upgrade` works for installs made with `uv tool install git+…` (the way this README installs). It reads
+the release tags of the official repository with `git ls-remote` (no GitHub API quota), resolves the tag to
+a commit, installs **that commit**, and checks that `agentloadout --version` and the installed commit match.
+If anything fails, it reinstalls the previous commit (an interrupted `uv tool install` can leave the old
+install broken, so it never assumes the old files are still there) and prints the manual command if even
+that fails. Before installing it backs up the catalog, plans, PIN and password records and config to
+`<data folder>/backups/pre-upgrade-…/` (the GitHub token is not copied; the last 3 backups are kept) and
+logs the attempt in `upgrade_history.json`. It refuses to run while a catalog refresh is running or while a
+plan is approved but not applied yet. Your data folder, PIN, password and MCP registration stay the same
+(the MCP path does not change, nothing to register again).
+
+After an upgrade, start a new session in your harness (a running MCP server keeps the old code) and
+restart the web UI; an on-demand web UI started by an agent is stopped automatically. Until then
+`agentloadout where`, `/api/health` and MCP responses warn that the running process is older than the files.
+
+- **Who may run it:** you, or an agent when you ask it to, but agents only to the newest release.
+  `--to vX.Y.Z` and every downgrade need you in your own terminal. Releases older than 0.3.0 are refused:
+  they ignore the hashed web password and the outside-access gate, so the web UI could open without a password.
+- **Pre-releases** only with `--pre`. **No automatic upgrades.**
+- A notice of a newer release shows in the web UI (with the changes and the command to copy; there is no
+  upgrade button), in `agentloadout where` and in MCP responses. They read a cached check made at most once
+  a day after a catalog refresh, or by `upgrade --check`.
+- A git checkout (for example started with `uv run`) is updated with `git pull` and a restart; uvx and plain
+  venv installs get the matching instructions.
+- `agentloadout update` is not a command: it points to `upgrade`. `check-updates` is about installed MCP
+  servers and skills.
 
 ## Settings: GitHub token
 

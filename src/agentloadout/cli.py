@@ -6,6 +6,7 @@
   agentloadout set-pin [--reset]                   set, change or reset the approval PIN (human, own terminal)
   agentloadout set-password [--reset | --off]      web UI password, needed to open it from a phone (human)
   agentloadout set-token [--from-env|--clear|--test]  GitHub token (raises the API limit; never in chat)
+  agentloadout upgrade [--check] [--to vX.Y.Z] [--yes] [--pre]   upgrade Agent Loadout itself (uv tool installs)
   agentloadout ui [--on-demand] [--port N]         local web catalog (http://127.0.0.1:8787)
   agentloadout plans | approve <id> | reject <id>  review install plans made by agents
   agentloadout refresh | backup | restore [file] | check-updates | where | harnesses
@@ -541,6 +542,14 @@ def main(argv=None):
     p.add_argument("file", nargs="?")
     sub.add_parser("check-updates", help="check newer versions of installed items")
     sub.add_parser("where", help="show data, config and backup folders")
+    p = sub.add_parser("upgrade", help="upgrade Agent Loadout itself to the newest release (uv tool installs)")
+    p.add_argument("--check", action="store_true", help="only check for a newer release (no changes)")
+    p.add_argument("--to", metavar="vX.Y.Z", help="a specific release tag (terminal only; downgrades need a human)")
+    p.add_argument("--yes", "-y", action="store_true", help="no confirmation (agents: only to the newest release)")
+    p.add_argument("--pre", action="store_true", help="include pre-releases")
+    p.add_argument("--force-insecure", action="store_true", help=argparse.SUPPRESS)
+    p = sub.add_parser("update", help="did you mean `upgrade`? (catalog items: check-updates)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     p = sub.add_parser("set-token", help="save, test or remove the GitHub token (raises the API limit)")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--from-env", action="store_true", help="save $GITHUB_TOKEN (for agents; never paste a token in chat)")
@@ -554,6 +563,13 @@ def main(argv=None):
         sys.exit(cmd_uninstall(a))
     if a.cmd == "set-pin":
         sys.exit(cmd_set_pin(a))
+    if a.cmd == "upgrade":
+        from . import selfupdate
+        sys.exit(selfupdate.upgrade(to=a.to, pre=a.pre, yes=a.yes, force_insecure=a.force_insecure, check_only=a.check))
+    if a.cmd == "update":
+        print("Maksud Anda `agentloadout upgrade`? (memperbarui Agent Loadout sendiri)\n"
+              "Untuk versi baru MCP/skill yang terpasang: `agentloadout check-updates`.", file=sys.stderr)
+        sys.exit(2)
     if a.cmd == "set-token":
         sys.exit(cmd_set_token(a))
     if a.cmd == "set-password":
@@ -616,6 +632,17 @@ def main(argv=None):
                                   "off": "not set (web only on this computer; `agentloadout set-password`)"}[pw["source"]])
         ui = web.read_ui()
         print(f"web UI  : http://{ui['host']}:{ui['port']}/ (pid {ui['pid']})" if ui else "web UI  : not running (`agentloadout ui`)")
+        if ui and ui.get("version") and ui["version"] != __version__:
+            print(f"          ! web UI ini masih versi {ui['version']} (terpasang {__version__}): mulai ulang web UI")
+        from . import selfupdate
+        c = selfupdate.read_cache()
+        kind = selfupdate.install_kind()["kind"]
+        line = f"version : {__version__} ({kind})"
+        if c and c.get("latest"):
+            line += f"; terbaru {c['latest']}, dicek {c.get('checked_at')}" + (" -> `agentloadout upgrade`" if c.get("newer") and kind == "uv-tool-git" else "")
+        elif c and c.get("error"):
+            line += f"; cek versi terakhir gagal ({c['error'][:60]})"
+        print(line)
 
 
 if __name__ == "__main__":
