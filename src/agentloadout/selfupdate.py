@@ -18,7 +18,6 @@ Rules (BRIEF-04 K7-K12):
 from __future__ import annotations
 
 import datetime as dt
-import glob
 import json
 import os
 import re
@@ -32,6 +31,8 @@ from pathlib import Path
 from . import __version__, paths
 
 REPO = "https://github.com/BagusFary/agentloadout"
+IS_WINDOWS = os.name == "nt"  # tests switch this to exercise the Windows paths on Linux
+TXT = {"encoding": "utf-8", "errors": "replace"}  # child output is read as UTF-8 on every OS (cp1252 cannot fail it)
 MIN_SAFE = (0, 3, 0)
 CHECK_EVERY = dt.timedelta(hours=24)
 LS_TIMEOUT = 15
@@ -98,7 +99,7 @@ def uv_tool_dir() -> str | None:
     uv = shutil.which("uv")
     if uv:
         try:
-            out = subprocess.run([uv, "tool", "dir"], capture_output=True, text=True, timeout=10)
+            out = subprocess.run([uv, "tool", "dir"], capture_output=True, timeout=10, **TXT)
             if out.returncode == 0 and out.stdout.strip():
                 return os.path.abspath(out.stdout.strip())
         except (OSError, subprocess.SubprocessError):
@@ -150,7 +151,7 @@ def ls_remote(repo: str, timeout: int = LS_TIMEOUT) -> dict:
         raise UpgradeError("git tidak ditemukan; cek versi butuh git")
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     try:
-        out = subprocess.run([git, "ls-remote", "--tags", repo], capture_output=True, text=True, timeout=timeout, env=env)
+        out = subprocess.run([git, "ls-remote", "--tags", repo], capture_output=True, timeout=timeout, env=env, **TXT)
     except subprocess.TimeoutExpired as e:
         raise UpgradeError("git ls-remote terlalu lama") from e
     if out.returncode != 0:
@@ -201,7 +202,7 @@ def fetch_changelog(repo: str, sha: str) -> str:
         git = shutil.which("git")
         try:
             out = subprocess.run([git, "--git-dir", repo[len("file://"):], "show", f"{sha}:CHANGELOG.md"],
-                                 capture_output=True, text=True, timeout=10)
+                                 capture_output=True, timeout=10, **TXT)
             return out.stdout if out.returncode == 0 else ""
         except (OSError, subprocess.SubprocessError, TypeError):
             return ""
@@ -261,16 +262,40 @@ def check(force: bool = False, pre: bool = False) -> dict:
     return read_cache()
 
 
+def _purelib(prefix: str, windows: bool | None = None) -> Path:
+    """site-packages of a venv: <prefix>/Lib/site-packages on Windows, <prefix>/lib/pythonX.Y/site-packages elsewhere."""
+    windows = IS_WINDOWS if windows is None else windows
+    import sysconfig
+    base = {"base": prefix, "platbase": prefix, "installed_base": prefix, "installed_platbase": prefix}
+    return Path(sysconfig.get_paths(scheme="nt" if windows else "posix_prefix", vars=base)["purelib"])
+
+
+def read_dist(prefix: str | None = None, windows: bool | None = None) -> dict:
+    """{version, commit} of agentloadout from the dist-info files on disk (no import, no glob over lib/python*)."""
+    site = _purelib(prefix or sys.prefix, windows)
+    try:
+        infos = [d for d in site.iterdir() if d.name.startswith("agentloadout-") and d.name.endswith(".dist-info")]
+    except OSError:
+        return {}
+    out = {}
+    for d in infos:
+        try:
+            for line in (d / "METADATA").read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("Version:"):
+                    out["version"] = line.split(":", 1)[1].strip()
+                    break
+        except OSError:
+            pass
+        try:
+            out["commit"] = (json.loads((d / "direct_url.json").read_text(encoding="utf-8")).get("vcs_info") or {}).get("commit_id")
+        except (OSError, ValueError):
+            pass
+    return out
+
+
 def disk_version() -> str | None:
     """Version installed on disk *now* (a long-running process may still run older code: H17)."""
-    for meta in glob.glob(os.path.join(sys.prefix, "lib", "python*", "site-packages", "agentloadout-*.dist-info", "METADATA")):
-        try:
-            for line in open(meta, encoding="utf-8"):
-                if line.startswith("Version:"):
-                    return line.split(":", 1)[1].strip()
-        except OSError:
-            continue
-    return None
+    return read_dist().get("version")
 
 
 def stale_process_note() -> str | None:
@@ -371,22 +396,49 @@ def _bin() -> str:
     return os.path.join(os.path.dirname(sys.executable), "agentloadout" + (".exe" if os.name == "nt" else ""))
 
 
+_PROBE = ("import json, importlib.metadata as m\n"
+          "d = m.distribution('agentloadout')\n"
+          "u = json.loads(d.read_text('direct_url.json') or '{}')\n"
+          "print(json.dumps({'version': d.version, 'commit': (u.get('vcs_info') or {}).get('commit_id')}))")
+
+
+def _venv_python() -> str:
+    """The tool venv's own interpreter (bin/python, Scripts\\python.exe): a new process sees the new venv."""
+    name = os.path.join("Scripts", "python.exe") if IS_WINDOWS else os.path.join("bin", "python")
+    cand = os.path.join(sys.prefix, name)
+    return cand if os.path.exists(cand) else sys.executable
+
+
 def _installed() -> tuple[str | None, str | None]:
-    """(version from `agentloadout --version`, direct_url.commit_id) of the files on disk, from a new process."""
+    """(version from `agentloadout --version`, direct_url.commit_id) of the venv on disk, read by new processes."""
     ver = None
     try:
-        out = subprocess.run([_bin(), "--version"], capture_output=True, text=True, timeout=60)
+        out = subprocess.run([_bin(), "--version"], capture_output=True, timeout=60, **TXT)
         if out.returncode == 0:
             ver = out.stdout.strip().split()[-1]
     except (OSError, subprocess.SubprocessError, IndexError):
         pass
     commit = None
-    for f in glob.glob(os.path.join(sys.prefix, "lib", "python*", "site-packages", "agentloadout-*.dist-info", "direct_url.json")):
-        try:
-            commit = (json.loads(open(f).read()).get("vcs_info") or {}).get("commit_id")
-        except (OSError, ValueError):
-            pass
+    try:
+        out = subprocess.run([_venv_python(), "-I", "-c", _PROBE], capture_output=True, timeout=60, **TXT)
+        if out.returncode == 0:
+            commit = json.loads(out.stdout.strip().splitlines()[-1]).get("commit")
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        pass
+    if commit is None:  # the interpreter cannot start (half-removed venv): read the files directly
+        commit = read_dist().get("commit")
     return ver, commit
+
+
+def base_python() -> str:
+    """Interpreter for `uv tool install --python`: the base Python, never one inside the venv uv is about to rebuild
+    (on Windows Scripts\\python.exe is a copy, so realpath(sys.executable) stays inside it). Falls back to "X.Y"."""
+    base = os.path.realpath(getattr(sys, "_base_executable", None) or sys.executable)
+    tool_dir = uv_tool_dir()
+    inside = [os.path.realpath(p) for p in (tool_dir, sys.prefix) if p]
+    if any(base == d or base.startswith(d + os.sep) for d in inside):
+        return f"{sys.version_info.major}.{sys.version_info.minor}"
+    return base
 
 
 def _uv_install(repo: str, sha: str, python: str) -> tuple[bool, str]:
@@ -396,36 +448,121 @@ def _uv_install(repo: str, sha: str, python: str) -> tuple[bool, str]:
     # the base interpreter, not the tool venv's own python (that venv is about to be rebuilt)
     cmd = [uv, "tool", "install", "--force", "--python", python, f"git+{repo}@{sha}"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        out = subprocess.run(cmd, capture_output=True, timeout=900, **TXT)
     except subprocess.TimeoutExpired:
         return False, "uv tool install terlalu lama"
     tail = (out.stderr or out.stdout).strip().splitlines()[-3:]
     return out.returncode == 0, " | ".join(tail)[:400]
 
 
-def stop_ondemand_ui() -> str:
-    """Stop this instance's on-demand web UI (started by open_dashboard) after an upgrade; report others."""
+def stop_ondemand_ui(wait: float = 5.0) -> str:
+    """Stop this instance's on-demand web UI (ui.json + /api/health answering with our instance id; no /proc), and
+    wait until it is gone. A UI started some other way (service, terminal) is only reported."""
     from .web import server as web
     ui = web.read_ui()
     if not ui:
         return "web UI tidak berjalan"
+    if web.instance_at(ui.get("host", "127.0.0.1"), ui.get("port")) != paths.instance_id():
+        return "web UI tidak berjalan"
     pid = ui.get("pid")
+    if not ui.get("on_demand") or not isinstance(pid, int):
+        return f"web UI di port {ui.get('port')} masih versi lama: mulai ulang (misalnya `systemctl --user restart ...` atau `agentloadout ui`)"
     try:
-        cmdline = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        os.kill(pid, signal.SIGTERM)  # TerminateProcess on Windows
     except OSError:
         return "web UI tidak berjalan"
-    args = [a.decode(errors="replace") for a in cmdline]
-    ours = (web.instance_at(ui.get("host", "127.0.0.1"), ui.get("port")) == paths.instance_id()
-            and "ui" in args and any("agentloadout" in a for a in args))
-    if ours and "--on-demand" in args:
-        os.kill(pid, signal.SIGTERM)
-        return f"web UI on-demand (pid {pid}) dihentikan; buka lagi lewat agen atau `agentloadout ui`"
-    return f"web UI di port {ui.get('port')} masih versi lama: mulai ulang (misalnya `systemctl --user restart …` atau `agentloadout ui`)"
+    import time
+    for _ in range(int(wait / 0.1)):
+        if web.instance_at(ui.get("host", "127.0.0.1"), ui.get("port")) is None:
+            break
+        time.sleep(0.1)
+    return f"web UI on-demand (pid {pid}) dihentikan; buka lagi lewat agen atau `agentloadout ui`"
+
+
+def _process_table() -> dict | None:
+    """{pid: (ppid, command line)} of all processes, or None when it cannot be read."""
+    procs = {}
+    if IS_WINDOWS:
+        ps = ("Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t"
+              "$($_.ExecutablePath) $($_.CommandLine)\" }")
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                                 capture_output=True, timeout=20, **TXT)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if out.returncode != 0:
+            return None
+        for line in out.stdout.splitlines():
+            parts = line.split("\t", 2)
+            if len(parts) == 3 and parts[0].isdigit():
+                procs[int(parts[0])] = (int(parts[1]) if parts[1].isdigit() else 0, parts[2])
+        return procs or None
+    if os.path.isdir("/proc/self"):
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            try:
+                cmd = open(f"/proc/{d}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
+                ppid = int(open(f"/proc/{d}/stat").read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            try:
+                cmd = os.readlink(f"/proc/{d}/exe") + " " + cmd
+            except OSError:
+                pass
+            procs[int(d)] = (ppid, cmd)
+        return procs or None
+    try:  # macOS and other POSIX systems
+        out = subprocess.run(["ps", "-axww", "-o", "pid=,ppid=,command="], capture_output=True, timeout=20, **TXT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2])
+    return procs or None
+
+
+def other_users(prefix: str | None = None, procs: dict | None = None) -> list[tuple[int, str]] | None:
+    """Other processes running from this tool venv (an agent's MCP server, a web UI): uv cannot safely rebuild a venv
+    that is in use (Windows locks the files; elsewhere they would keep running old code). This process and its
+    parents are excluded. None when the process list cannot be read."""
+    prefix = os.path.abspath(prefix or sys.prefix)
+    procs = _process_table() if procs is None else procs
+    if procs is None:
+        return None
+    mine, pid = set(), os.getpid()
+    while pid and pid not in mine:
+        mine.add(pid)
+        pid = procs.get(pid, (0, ""))[0]
+    marks = {prefix + os.sep, os.path.realpath(prefix) + os.sep}
+    if IS_WINDOWS:
+        marks |= {m.lower() for m in marks}
+    hits = []
+    for p, (_, cmd) in sorted(procs.items()):
+        if p in mine:
+            continue
+        text = cmd.lower() if IS_WINDOWS else cmd
+        if any(m in text for m in marks):
+            short = cmd.replace(prefix + os.sep, "")
+            hits.append((p, " ".join(short.split())[:100]))
+    return hits
+
+
+def _safe(out):
+    """An output function that never raises UnicodeEncodeError (a cp1252 pipe on Windows); text becomes '?'."""
+    def emit(text=""):
+        try:
+            out(text)
+        except UnicodeEncodeError:
+            out(str(text).encode("ascii", "replace").decode("ascii"))
+    return emit
 
 
 def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_insecure: bool = False,
             check_only: bool = False, out=print, ask=None) -> int:
     from . import refresh
+    out = _safe(out)
     info = install_kind()
     if check_only:
         stuck = interrupted_note()
@@ -580,6 +717,22 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
             return 1
     action = "downgrade" if downgrade else "upgrade"
     out(f"{action}: {__version__} ({(old_sha or '?')[:7]}) -> {tag_version(tag)} ({sha[:7]}) dari {repo}")
+    if IS_WINDOWS:
+        return _windows_manual(repo, tag, sha, old_sha, human, out)
+    stopped = stop_ondemand_ui()  # our own idle-stopping web UI may simply be stopped
+    if "dihentikan" in stopped:
+        out("  " + stopped)
+    users = other_users()
+    if users is None:
+        out("  PERINGATAN: daftar proses tidak bisa dibaca; pastikan agen/harness dan web UI yang memakai Agent Loadout "
+            "sudah ditutup.")
+    elif users:
+        out("upgrade ditolak: proses lain masih memakai Agent Loadout ini (biasanya server MCP sebuah agen/harness, "
+            "atau web UI):")
+        for p, cmd in users:
+            out(f"  pid {p}: {cmd}")
+        out("Tutup agen/harness itu dulu (dan `agentloadout ui`), lalu ulangi `agentloadout upgrade`.")
+        return 2
     if not yes:
         if not sys.stdin.isatty():
             out("Tidak ada terminal untuk konfirmasi. Jalankan dengan --yes.")
@@ -588,7 +741,7 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
             out("Dibatalkan.")
             return 1
     from .web import server as _web  # noqa: F401  (load now: after uv rebuilds the venv, lazy imports would read new files)
-    python = os.path.realpath(sys.executable)
+    python = base_python()
     entry = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "from": __version__, "from_sha": old_sha,
              "to": tag_version(tag), "to_sha": sha, "tag": tag, "by": "terminal" if human else "agent/non-tty"}
     try:
@@ -610,23 +763,56 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
     except (KeyboardInterrupt, SystemExit) as e:
         _ignore_signals()  # the restore below must not be interrupted as well
         why = "dihentikan (Ctrl-C)" if isinstance(e, KeyboardInterrupt) else (str(e) or "dihentikan")
-        out(f"\n  ✗ upgrade terputus: {why}. Memulihkan versi lama, jangan hentikan lagi…")
         entry.update(status="interrupted", error=why)
+        _say(out, f"\n  [GAGAL] upgrade terputus: {why}. Memulihkan versi lama, jangan hentikan lagi...")
         _restore_old(repo, old_sha, python, entry, out)
         return 130
     if ok and ver == tag_version(tag) and commit == sha:
         entry["status"] = "ok"
         _history_add(entry)
-        out(f"  ✓ terpasang {ver} ({commit[:7]}), path MCP tetap: {_bin()} mcp")
+        out(f"  [OK] terpasang {ver} ({commit[:7]}), path MCP tetap: {_bin()} mcp")
         out("  " + stop_ondemand_ui())
         out("Mulai sesi baru di harness/agen agar MCP memakai versi baru (tidak perlu daftar ulang).")
         return 0
     why = detail if not ok else f"verifikasi gagal: --version={ver!r}, commit={commit and commit[:7]!r}, harusnya {tag_version(tag)}/{sha[:7]}"
-    out(f"  ✗ {why}")
     entry.update(status="failed", error=why)
     _ignore_signals()  # a rollback must not be interrupted either
+    _say(out, f"  [GAGAL] {why}")
     _restore_old(repo, old_sha, python, entry, out)
     return 1
+
+
+def _say(out, text):
+    """Output before a rollback: nothing it raises may stop the rollback."""
+    try:
+        out(text)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _windows_manual(repo, tag, sha, old_sha, human, out) -> int:
+    """Windows: uv cannot rebuild a venv whose files are in use (this very process holds them), so a half-removed
+    install is likely (BUG-01). Print safe manual steps instead; agents pass them on to the user."""
+    install = f'uv tool install --force "git+{repo}@{sha}"'
+    recover = f'uv tool install --force "git+{repo}@{old_sha or "v" + __version__}"'
+    users = other_users()
+    out("\nDi Windows, Agent Loadout tidak memasang ulang dirinya sendiri: file yang sedang dipakai terkunci, sehingga")
+    out("instalasi bisa rusak. Lakukan langkah ini sendiri (agen: sampaikan ke pengguna, jangan jalankan uv sendiri):")
+    out("  1. Tutup semua agen/harness yang memakai Agent Loadout (Claude Code, Codex, Cursor, OpenBot, ...) dan")
+    out("     jendela `agentloadout ui`.")
+    if users:
+        out("     Masih memakai Agent Loadout sekarang: " + ", ".join(f"pid {p} ({c})" for p, c in users))
+    out("  2. Di PowerShell baru:")
+    out(f"       {install}")
+    out("     Kalau muncul \"Access is denied\": ulangi langkah 1. Kalau masih gagal: `uv tool uninstall agentloadout`,")
+    out("     lalu ulangi perintah di atas.")
+    out(f"  3. Cek: `agentloadout --version` harus {tag_version(tag)}. Path MCP tidak berubah; buka lagi agen/harness.")
+    out(f"Kembali ke versi sekarang kalau perlu: {recover}")
+    out(f"Data (katalog, PIN, rencana) tetap di {paths.home()}.")
+    _history_add({"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "from": __version__,
+                  "from_sha": old_sha, "to": tag_version(tag), "to_sha": sha, "tag": tag, "status": "manual",
+                  "command": install, "recover": recover, "by": "terminal" if human else "agent/non-tty"})
+    return 0
 
 
 def _restore_old(repo, old_sha, python, entry, out) -> bool:
@@ -636,24 +822,24 @@ def _restore_old(repo, old_sha, python, entry, out) -> bool:
     if old_sha and commit == old_sha and ver == __version__:
         entry["rollback"] = "tidak perlu: instalasi lama masih utuh"
         _history_add(entry)
-        out(f"  instalasi lama masih utuh: {ver} ({old_sha[:7]}). Tidak ada yang berubah.")
+        _say(out, f"  instalasi lama masih utuh: {ver} ({old_sha[:7]}). Tidak ada yang berubah.")
         return True
     if not old_sha:
         entry["rollback"] = "tidak bisa: SHA lama tidak diketahui"
         _history_add(entry)
-        out(f"Rollback tidak bisa (SHA lama tidak diketahui). Pasang ulang manual: {entry.get('recover')}")
+        _say(out, f"Rollback tidak bisa (SHA lama tidak diketahui). Pasang ulang manual: {entry.get('recover')}")
         return False
-    out(f"  rollback ke {__version__} ({old_sha[:7]})…")
+    _say(out, f"  rollback ke {__version__} ({old_sha[:7]})...")
     rok, rdetail = _uv_install(repo, old_sha, python)
     rver, rcommit = _installed()
     if rcommit == old_sha and rver == __version__:
         entry["rollback"] = "ok"
         _history_add(entry)
-        out(f"  ✓ kembali ke {rver} ({old_sha[:7]}). Tidak ada yang berubah.")
+        _say(out, f"  [OK] kembali ke {rver} ({old_sha[:7]}). Tidak ada yang berubah.")
         return True
     entry["rollback"] = f"gagal: {rdetail}"
     _history_add(entry)
-    out("  ✗ rollback juga gagal. Pasang ulang manual:\n"
+    _say(out, "  [GAGAL] rollback juga gagal. Pasang ulang manual:\n"
         f"    {entry.get('recover')}\n"
         f"  Data dan cadangan tetap aman di {paths.home()} ({entry.get('backup')}).")
     return False

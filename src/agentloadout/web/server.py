@@ -662,7 +662,7 @@ def main(host=None, port=None, on_demand=False):
         print(note, file=sys.stderr, flush=True)
     from .. import __version__
     paths.write_private(ui_file(), json.dumps({"host": shown, "port": port, "pid": os.getpid(), "instance": INSTANCE[0],
-                                               "version": __version__,
+                                               "version": __version__, "on_demand": bool(on_demand),
                                                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}))
     LAST_REQUEST[0] = time.time()
     idle = int(w.get("idle_shutdown_minutes") or 0) * 60

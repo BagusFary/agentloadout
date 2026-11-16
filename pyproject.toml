@@ -1,6 +1,6 @@
 [project]
 name = "agentloadout"
-version = "0.5.0"
+version = "0.5.1"
 description = "Discover, vet, and equip trending MCP servers, agent skills, and AI-agent apps — for any agent harness."
 readme = "README.md"
 requires-python = ">=3.11"
