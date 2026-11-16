@@ -147,7 +147,8 @@ The menu appears only when stdin **and** stdout are a terminal, no agent marker 
 `AI_AGENT`, `CODEX_*`, `OPENBOT_AGENT_PROCESS`, `GEMINI_CLI`, `OPENCODE`, `CURSOR_AGENT`, `AGENT`, ...),
 `TERM` is not `dumb` and `CI` is empty. Set `AGENTLOADOUT_NO_MENU=1` to switch it off. Everywhere else
 `agentloadout` without arguments prints the usage and exits with code 2, as before. Without input for 15
-minutes the menu closes itself. Ctrl-C or `0` leaves it; Ctrl-C inside a choice returns to the menu. The
+minutes the menu closes itself (this limit applies to the menu's own prompt only; a prompt inside a choice,
+such as the PIN or a confirmation, waits as the normal command does). Ctrl-C or `0` leaves it; Ctrl-C inside a choice returns to the menu. The
 status line never uses the network and never creates the catalog. Output is plain ASCII; only the banner is
 coloured, and not with `NO_COLOR` set.
 

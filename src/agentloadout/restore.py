@@ -78,5 +78,5 @@ def main(argv=None):
     print(f"dipulihkan ke {a.target}: integrity {ok2}, {counts2}")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # also scripts/restore.py (runpy): keep the exit code (1 for a broken backup)
+    sys.exit(main())

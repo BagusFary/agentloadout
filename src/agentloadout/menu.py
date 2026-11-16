@@ -141,7 +141,7 @@ def confirm_typed(word: str, what: str) -> bool:
 def catalog_count() -> str:
     import sqlite3
     from . import paths
-    db = Path(paths.db_path())
+    db = Path(os.environ["AGENTLOADOUT_DB"]).expanduser() if os.environ.get("AGENTLOADOUT_DB") else paths.home_dir() / "catalog.db"
     if not db.exists():
         return "belum ada"
     try:
@@ -155,8 +155,18 @@ def catalog_count() -> str:
         return "katalog tidak terbaca"
 
 
+def _fresh() -> bool:
+    """No data folder yet: show the status without creating anything (most modules create it on first use)."""
+    from . import paths
+    return not paths.home_dir().exists()
+
+
 def status_parts() -> list[str]:
-    from . import config, pin, plans, refresh, selfupdate, web_password
+    if _fresh():
+        tok = "env" if os.environ.get("GITHUB_TOKEN") else "env file" if os.environ.get("GITHUB_TOKEN_FILE") else "[ ] belum"
+        return [f"v{__version__}", "PIN [ ] belum", "password web [ ]", f"token {tok}", "katalog " + catalog_count(),
+                "refresh diam", "rencana menunggu 0", "belum ada folder data (agentloadout setup)"]
+    from . import config, pin, refresh, selfupdate, web_password
     parts = []
     ver = f"v{__version__}"
     c = selfupdate.read_cache() or {}
@@ -172,16 +182,14 @@ def status_parts() -> list[str]:
                              .get(ti["active"], "[ ] belum") if ti["active"] else "[ ] belum"))
     parts.append("katalog " + catalog_count())
     parts.append("refresh " + ("berjalan" if refresh.running() else "diam"))
-    try:
-        n = len(plans.list_plans("pending"))
-    except (OSError, ValueError):
-        n = 0
-    parts.append(f"rencana menunggu {n}")
+    parts.append(f"rencana menunggu {pending_count()}")
     return parts
 
 
 def pending_count() -> int:
-    from . import plans
+    from . import paths, plans
+    if not (paths.home_dir() / "plans").is_dir():  # do not create plans/ just to count nothing
+        return 0
     try:
         return len(plans.list_plans("pending"))
     except (OSError, ValueError):

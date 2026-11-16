@@ -338,3 +338,58 @@ def test_no_token_literals_in_the_repository():
                 if pat.search(line):
                     hits.append(f"{f}:{n}")
     assert hits == []
+
+
+# ------------------------------------------------------------------ review fixes: W5 (restore exit code), S22 (no folders)
+FAKE_BROKEN_SQLITE = """
+import sqlite3
+class _Con:
+    def execute(self, q):
+        class R:
+            def fetchone(self_inner):
+                return ("rusak: halaman 2",) if "integrity_check" in q else (0,)
+        return R()
+    def close(self):
+        pass
+sqlite3.connect = lambda *a, **k: _Con()   # every backup now looks damaged
+"""
+
+
+def test_restore_module_and_script_exit_1_for_a_broken_backup(sb, tmp_path):
+    backup = tmp_path / "rusak.db"
+    backup.write_text("x")
+    target = tmp_path / "target.db"
+    env = {**sb.env, "AGENTLOADOUT_BACKUP_DIR": str(tmp_path / "bk")}
+    code = FAKE_BROKEN_SQLITE + ("import runpy, sys\nsys.argv = ['restore', %r, '--target', %r]\n"
+                                 "runpy.run_module('agentloadout.restore', run_name='__main__', alter_sys=True)") % (str(backup), str(target))
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and "cadangan rusak" in r.stderr, (r.returncode, r.stderr)
+    # the owner's scripts/restore.py wrapper (copied to /tmp, its src/ pointing at this repo)
+    inst = tmp_path / "instance"
+    (inst / "scripts").mkdir(parents=True)
+    import shutil
+    shutil.copy2(ROOT / "scripts" / "restore.py", inst / "scripts" / "restore.py")
+    (inst / "src").symlink_to(ROOT / "src")
+    code = FAKE_BROKEN_SQLITE + ("import runpy, sys\nsys.argv = [%r, %r, '--target', %r]\nrunpy.run_path(%r, run_name='__main__')"
+                                 % (str(inst / "scripts" / "restore.py"), str(backup), str(target), str(inst / "scripts" / "restore.py")))
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and "cadangan rusak" in r.stderr, (r.returncode, r.stderr)
+    assert not target.exists()
+    cli = sb.cli("restore", str(backup), extra_env={"AGENTLOADOUT_BACKUP_DIR": str(tmp_path / "bk")})
+    assert cli.returncode == 1  # the CLI path keeps its code too (a real non-database file here)
+
+
+def test_menu_on_an_empty_home_creates_no_folder(sb):
+    assert not sb.al.exists()
+    res = run_menu(sb, answers=[(MENU, "0")])
+    assert res["rc"] == 0 and "belum ada folder data" in res["out"]
+    assert not sb.al.exists(), sorted(str(p) for p in sb.al.rglob("*"))
+
+
+def test_render_on_an_empty_home_creates_no_folder(tmp_path, monkeypatch):
+    fresh = tmp_path / "nothing-here"
+    monkeypatch.setenv("AGENTLOADOUT_HOME", str(fresh))
+    from agentloadout import menu
+    text = menu.render(100)
+    assert "rencana menunggu 0" in text and "katalog belum ada" in text
+    assert not fresh.exists()
