@@ -3,6 +3,9 @@
 - Uses SQLite's online backup API (safe while the web server reads the DB).
 - Verifies each copy with PRAGMA integrity_check.
 - Keeps the last 7 daily and 4 weekly copies.
+- The first backup of a day is daily/katalog-<date>.db and is never overwritten that day: later runs
+  ("Perbarui sekarang", a second refresh) write katalog-<date>-<HHMMSS>.db; per day only the newest
+  KEEP_EXTRA_PER_DAY of those extra copies are kept.
 - Also writes a small JSON export of the data GitHub cannot give back
   (star history, install status, translations).
 
@@ -15,12 +18,12 @@ import gzip
 import json
 import os
 import sqlite3
-import sys
 
-from . import db, paths  # noqa: E402
+from . import paths  # noqa: E402
 
 KEEP_DAILY = 7
 KEEP_WEEKLY = 4
+KEEP_EXTRA_PER_DAY = 3
 IRREPLACEABLE = ("star_snapshots", "installs", "translations", "meta")
 
 
@@ -59,15 +62,24 @@ def export_state(db_path, out_path):
     return {t: len(v) for t, v in data.items()}
 
 
-def rotate(folder, keep):
+def _day(stem):
+    return stem[8:18]  # katalog-YYYY-MM-DD[-HHMMSS]
+
+
+def rotate(folder, keep, keep_extra=KEEP_EXTRA_PER_DAY):
+    """Keep the newest `keep` days; within a day keep the first copy and the newest `keep_extra` extra ones."""
     files = sorted(f for f in os.listdir(folder) if f.startswith("katalog-") and f.endswith((".db", ".state.json.gz")))
-    days = sorted({f.split(".")[0] for f in files}, reverse=True)
+    stems = sorted({f.split(".")[0] for f in files})
+    days = sorted({_day(st) for st in stems}, reverse=True)
+    drop = {st for st in stems if _day(st) in set(days[keep:])}
+    for day in days[:keep]:
+        extras = sorted(st for st in stems if _day(st) == day and len(st) > 18)
+        drop.update(extras[:-keep_extra] if keep_extra else extras)
     removed = 0
-    for old in days[keep:]:
-        for f in files:
-            if f.startswith(old + "."):
-                os.remove(os.path.join(folder, f))
-                removed += 1
+    for f in files:
+        if f.split(".")[0] in drop:
+            os.remove(os.path.join(folder, f))
+            removed += 1
     return removed
 
 
@@ -92,6 +104,8 @@ def main_args(argv):
         return
     stamp = dt.date.today().isoformat()
     base = os.path.join(daily, f"katalog-{stamp}")
+    if os.path.exists(base + ".db"):  # keep the day's first copy (the state before today's first run)
+        base = os.path.join(daily, f"katalog-{stamp}-{dt.datetime.now().strftime('%H%M%S')}")
     snapshot(src, base + ".db")
     counts = export_state(base + ".db", base + ".state.json.gz")
 

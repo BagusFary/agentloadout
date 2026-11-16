@@ -52,3 +52,12 @@ Sisa:
 - OpenBot: `setup` di shell OpenBot = `--to openbot` (instruksi `openbot.save_mcp_server`); status `awaiting_agent` + tool `report_agent_step`.
 - Port: `instance_id`, `ui.json`, pindah otomatis bila port terpakai (kecuali `--port`/`AGENTLOADOUT_PORT`).
 - Backlog: token di URL lokal (K1-B), PIN untuk `/api/install`, uji Windows/macOS, Safari + cookie Secure, header Cloudflare Tunnel.
+
+## v0.4.0 tahap 1: menu token GitHub + indikator pengambilan katalog (16 Nov 2026)
+- Pengaturan web: token GitHub (simpan & uji, uji, hapus; sumber aktif, jenis, …4 karakter, kedaluwarsa) + Keamanan.
+- Urutan token: GITHUB_TOKEN > GITHUB_TOKEN_FILE > token yang dikelola (`<data>/github_token`) > token_file config.
+- CLI `agentloadout set-token [--from-env|--test|--clear]`; `where` menampilkan sumber aktif.
+- Indikator: status berjalan dari kunci refresh, tahap/n/total/mulai/perkiraan/menunggu kuota, banner gagal, ringkasan, label "Belum diperiksa" + filter.
+- Tombol "Perbarui sekarang" (jeda 15 menit); `scripts/collect.py` memakai kunci yang sama.
+- Cadangan pertama hari itu tidak tertimpa; log web tanpa query string.
+- Tahap 2 (fitur upgrade Agent Loadout) menyusul di branch yang sama.

@@ -17,7 +17,7 @@ Paste this to your agent (Claude Code, Codex, Cursor, Gemini CLI, OpenCode):
 **1. Install and register** (the agent can run this; nothing here needs a person):
 
 ```bash
-uv tool install "git+https://github.com/BagusFary/agentloadout@v0.3.0"
+uv tool install "git+https://github.com/BagusFary/agentloadout@v0.4.0"
 "$(uv tool dir --bin)/agentloadout" setup --yes
 ```
 
@@ -26,15 +26,16 @@ installed program, and installs a short guide skill so agents know the safe work
 `setup` and `uninstall` need `--yes`; otherwise they stop with exit code 2. Use
 `setup --yes --to claude-code,codex` to pick harnesses.
 
-**2. GitHub token (optional, recommended).** A token without scopes raises the GitHub API limit from 60
-to 5,000 requests per hour. Your harness does not pass the agent's shell variables to MCP servers, so
-store it once:
+**2. GitHub token (optional, recommended).** A read-only token raises the GitHub API limit from 60 to
+5,000 requests per hour. The easiest way is the web **Settings** menu (see "Settings: GitHub token") or
+`agentloadout set-token` in your own terminal. If the token is already in the agent's shell:
 
 ```bash
 GITHUB_TOKEN=... "$(uv tool dir --bin)/agentloadout" setup --yes --token-from-env
 ```
 
-The token is written to `<data folder>/github_token` (mode 0600) and is never printed.
+The token is tested against GitHub, written to `<data folder>/github_token` (mode 0600) and never printed.
+Never paste a token into an agent chat.
 
 **3. Restart your harness** so it starts the MCP server: Claude Code, Codex, Gemini CLI and OpenCode —
 start a new session; Cursor — reload the window.
@@ -128,9 +129,123 @@ agentloadout plans         # plans waiting for approval
 agentloadout approve <id>  # approve (interactive terminal + PIN)
 agentloadout set-pin       # set or change the approval PIN       (--reset: forgot it)
 agentloadout set-password  # web password, needed for your phone   (--reset: forgot it, --off: remove)
+agentloadout set-token     # GitHub token, hidden input              (--test, --clear, --from-env)
+agentloadout upgrade       # upgrade Agent Loadout itself            (--check, --to vX.Y.Z, --pre)
 agentloadout harnesses     # detected harnesses and config paths
 agentloadout where         # data, config and backup folders
 ```
+
+## Upgrade
+
+```bash
+agentloadout upgrade --check   # is there a newer release? (no changes)
+agentloadout upgrade           # install the newest release tag
+```
+
+**From v0.3.0:** v0.3.0 has no `upgrade` command yet, so move to v0.4.0 once by hand:
+
+```bash
+uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.4.0"
+```
+
+From v0.4.0 on, use `agentloadout upgrade`.
+
+`upgrade` works for installs made with `uv tool install git+…` (the way this README installs). It reads
+the release tags of the official repository with `git ls-remote` (no GitHub API quota), resolves the tag to
+a commit, installs **that commit**, and checks that `agentloadout --version` and the installed commit match.
+If anything fails, it reinstalls the previous commit (an interrupted `uv tool install` can leave the old
+install broken, so it never assumes the old files are still there) and prints the manual command if even
+that fails. Before installing it backs up the catalog, plans, PIN and password records and config to
+`<data folder>/backups/pre-upgrade-…/` (the GitHub token is not copied; the last 3 backups are kept) and
+logs the attempt in `upgrade_history.json`. It refuses to run while a catalog refresh is running or while a
+plan is approved but not applied yet. Your data folder, PIN, password and MCP registration stay the same
+(the MCP path does not change, nothing to register again).
+
+Do not stop an upgrade half-way. It prints a recovery command before it touches the install; Ctrl-C or a
+`kill` (SIGTERM) during the install makes it restore the previous version and exit with 130, but a hard kill
+(`kill -9`) cannot be caught: then run the printed `uv tool install --force "git+…@<old commit>"` yourself
+(`agentloadout where` and `upgrade --check` show it too). **Agents:** run `agentloadout upgrade` without a
+short command timeout (or in the background) and never interrupt it; if it was cut off, run the recovery
+command it printed.
+
+After an upgrade, start a new session in your harness (a running MCP server keeps the old code) and
+restart the web UI; an on-demand web UI started by an agent is stopped automatically. Until then
+`agentloadout where`, `/api/health` and MCP responses warn that the running process is older than the files.
+
+- **Who may run it:** you, or an agent when you ask it to, but agents only to the newest release.
+  `--to vX.Y.Z` and every downgrade need you in your own terminal. Releases older than 0.3.0 are refused:
+  they ignore the hashed web password and the outside-access gate, so the web UI could open without a password.
+- **Pre-releases** only with `--pre`, which (like `--to`) needs you in your own terminal.
+  **No automatic upgrades.**
+- A notice of a newer release shows in the web UI (with the changes and the command to copy; there is no
+  upgrade button), in `agentloadout where` and in MCP responses. They read a cached check made at most once
+  a day after a catalog refresh, or by `upgrade --check`.
+- A git checkout (for example started with `uv run`) is updated with `git pull` and a restart; uvx and plain
+  venv installs get the matching instructions.
+- `agentloadout update` is not a command: it points to `upgrade`. `check-updates` is about installed MCP
+  servers and skills.
+
+## Settings: GitHub token
+
+The gear icon in the web UI opens **Pengaturan** (Settings): the GitHub token on top, then the security
+section (password, PIN, log out everywhere). For the token you can:
+
+- **Simpan & uji** (save and test): the token is checked with GitHub's `/rate_limit` (uses no quota).
+  A token GitHub rejects (401) is not saved. If GitHub cannot be reached, it is saved with a warning.
+- **Uji** (test) the token you typed, or the active one when the field is empty. At most 10 tests per
+  minute per instance.
+- **Hapus** (remove) the token that Agent Loadout manages. Tokens from environment variables or
+  `config.toml` are only shown, never changed.
+
+The menu shows which source is active, its kind (classic / fine-grained), its last 4 characters and the
+expiry date GitHub reports (shown raw when its format is unknown). It never shows or returns the token.
+From the laptop it always works; from a phone only in a logged-in session over HTTPS that is not a
+Tailscale Funnel request, so a token never travels over plain HTTP.
+
+Recommended token: a **fine-grained** token with *Repository access: Public repositories (read-only)*, no
+account permissions, expiring in 90 days. A classic token works too; it needs **no scopes**, and the menu
+warns when a classic token has some.
+
+The terminal does the same: `agentloadout set-token` (hidden input), `--test`, `--clear`, and
+`--from-env` (saves `$GITHUB_TOKEN`; meant for agents, so they never ask for a token in chat).
+
+Which token is used (first one present wins):
+
+| Order | Source | Set with |
+|---|---|---|
+| 1 | `GITHUB_TOKEN` environment variable | the process that runs Agent Loadout |
+| 2 | `GITHUB_TOKEN_FILE` environment variable (path to a file) | the process that runs Agent Loadout |
+| 3 | `<data folder>/github_token` | Settings menu, `set-token`, `setup --token-from-env` |
+| 4 | `[github] token_file` in `config.toml` | editing the config |
+
+The web UI, the MCP server and the daily routine are separate processes: a variable set in one of them
+does not reach the others. `agentloadout where` and the Settings menu show the source each one sees, and
+every catalog run records the source it really used (`last_run.token_source`). A new token is used from
+the next catalog refresh; nothing needs a restart.
+
+## Catalog fetch indicator and "Perbarui sekarang"
+
+While the catalog is being fetched the web UI shows a banner with the stage (backup, search, repo
+details, saving), the count (`400/630`), the start time and an estimate. The first fetch of an empty
+catalog says "Katalog pertama sedang diambil". When GitHub's rate limit makes it pause, the banner says
+until when ("Menunggu kuota GitHub sampai 15:02"). Whether a fetch is running comes from the refresh lock,
+so a stopped or killed fetch never keeps showing "running".
+
+After a fetch: a summary line ("Katalog diperbarui <time> · N item"); a red banner with the (sanitized)
+error when the last fetch failed; yellow notes when items are not checked yet, the API quota ran out, or
+no token is set, with a button to the token settings. Cards of repositories that could not be examined
+carry a **Belum diperiksa** label, and a filter shows only those.
+
+**Perbarui sekarang** (update now) starts a fetch from the web UI: only from the laptop or a logged-in
+session that is not a Tailscale Funnel request, not while one is running, and at most once every 15
+minutes (counted from the last start of any fetch). Without a token it warns first: 60 requests per hour,
+so more items may stay unchecked.
+
+Every way of fetching (MCP, web, `agentloadout refresh`, the daily routine) takes the same lock, so two
+never run at once; the one that comes second stops (the routine with exit code 0). Each fetch backs up the
+catalog first. The first backup of a day is kept as it is; later fetches that day get their own file
+(`katalog-<date>-<time>.db`, the newest 3 per day are kept), so a bad repeated run cannot overwrite the
+good copy from the morning.
 
 ## Open it from your phone (Akses dari HP)
 
@@ -226,11 +341,16 @@ Every config file is backed up before it changes; removing an item restores it.
 - **Limits.** Everything runs as your user, so an agent with unrestricted shell access can still bypass
   local controls on purpose: it can edit a plan file (the approval record is hashed, but the hash is not
   secret and can be recomputed), call the Python API, delete the PIN file and set a new PIN through a
-  pseudo-terminal with the agent variables removed, or edit harness configs directly. None of these is a
+  pseudo-terminal with the agent variables removed, run `agentloadout upgrade --to`/`--pre` or a downgrade
+  the same way (the "human at a terminal" check is a terminal plus no agent variables), or edit harness
+  configs directly. None of these is a
   documented one-step path, and each is a deliberate file change your harness shows you. The resets
   (`set-pin --reset`, `set-password --reset`) are traces, not barriers: a program running as you could
   run them too, but the reset time stays visible in `where` and the web UI. Keep your harness' own
   command approval prompts turned on and never tell an agent your PIN or password.
+- **HTTPS for the token comes from the proxy's header.** From outside the laptop the token menu requires
+  `X-Forwarded-Proto: https` (set by `tailscale serve`). A client on the LAN could send that header itself
+  over plain HTTP; that only exposes the token it is sending itself, but use the menu over HTTPS only.
 - **The PIN hash can be guessed offline.** `approval_pin.json` is readable by your user, so a program
   running as you can copy it and try PINs without the 5-try limit. scrypt makes each try slow (measured: about
   0.19 s per try on one laptop core). Estimate: trying every 8-digit PIN takes about 220 core-days, so
@@ -245,7 +365,7 @@ Every config file is backed up before it changes; removing an item restores it.
 
 ```toml
 [github]
-# token_file = "/path/to/github_token"   # optional; default: env GITHUB_TOKEN, then <data folder>/github_token
+# token_file = "/path/to/github_token"   # optional; lowest priority (see "Settings: GitHub token")
 
 [web]
 host = "127.0.0.1"

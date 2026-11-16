@@ -67,13 +67,14 @@ function isInstalled(it) { return it.install_state && it.install_state.status ==
 function filtered() {
   const q = $("#q").value.trim().toLowerCase();
   const cat = $("#cat").value;
-  const fi = $("#f-install").checked, fs = $("#f-safe").checked, fd = $("#f-installed").checked;
+  const fi = $("#f-install").checked, fs = $("#f-safe").checked, fd = $("#f-installed").checked, fu = $("#f-unchecked").checked;
   let list = state.items.filter((it) =>
     (state.kind === "all" || it.kind === state.kind) &&
     (!cat || it.category === cat) &&
     (!fi || (it.install || []).length) &&
     (!fs || !hasHigh(it)) &&
     (!fd || isInstalled(it)) &&
+    (!fu || it.checked === 0) &&
     (!q || [it.name, it.full_name, it.description, it.description_id, (it.topics || []).join(" "), (it.skills || []).map((k) => k.name).join(" ")].join(" ").toLowerCase().includes(q))
   );
   const s = $("#sort").value;
@@ -102,8 +103,10 @@ const LEVEL = { high: "tinggi", medium: "sedang", info: "info" };
 function card(it) {
   const risks = (it.risks || []).filter((r) => r.level !== "info").slice(0, 2)
     .map((r) => `<span class="tag"><span class="dot ${r.level}"></span>${esc(r.label)}</span>`).join("");
+  // checked: 0 = not examined (GitHub API quota ran out); NULL (older catalogs) counts as examined
+  const unchecked = it.checked === 0 ? '<span class="state wait" title="Detail repo (README, daftar skill, cara pasang) belum diambil karena kuota API GitHub habis. Dilengkapi di pembaruan berikutnya; token GitHub mempercepatnya.">Belum diperiksa</span>' : "";
   return `<article class="card" data-id="${esc(it.id)}">
-    <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span><span>·</span><span class="owner">${esc(it.full_name.split("/")[0])} · ${esc(it.category)}</span>${stateBadge(it)}</div>
+    <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span><span>·</span><span class="owner">${esc(it.full_name.split("/")[0])} · ${esc(it.category)}</span>${stateBadge(it)}${unchecked}</div>
     <h3>${esc(it.name)}</h3>
     <p class="desc">${esc(it.description_id || it.description || "Tanpa deskripsi")}</p>
     <div class="stats"><span>★ ${fmt(it.stars)}</span><span class="hot">↑ ${momentumText(it)}</span><span>${ago(it.pushed_at)}</span>${(it.install || []).length ? "<span>Siap pasang</span>" : ""}</div>
@@ -127,7 +130,7 @@ function render(animate = true) {
 
 function freshRows() {
   const q = $("#q").value.trim(), cat = $("#cat").value;
-  const filtersOn = q || cat || $("#f-install").checked || $("#f-safe").checked || $("#f-installed").checked;
+  const filtersOn = q || cat || $("#f-install").checked || $("#f-safe").checked || $("#f-installed").checked || $("#f-unchecked").checked;
   const pool = state.items.filter((it) => state.kind === "all" || it.kind === state.kind);
   if (filtersOn || !pool.length) return [];
   const DAY = 86400000, now = Date.now();
@@ -431,7 +434,7 @@ async function load(quiet) {
     requestAnimationFrame(moveSeg);
     if (quiet) { $("#grid").classList.remove("fade"); void $("#grid").offsetWidth; $("#grid").classList.add("fade"); }
     render(!quiet);
-    showSync(j.meta.progress);
+    pollStatus();
   } finally { topbar(false); }
 }
 
@@ -439,37 +442,103 @@ function showUpdated(lr) {
   $("#updated").textContent = lr ? `Diperbarui ${new Date(lr.at).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })}` : "Belum ada data";
 }
 
-let syncTimer = null, wasRunning = false;
-function showSync(p) {
+let syncTimer = null, wasRunning = false, lastStatus = null;
+const hhmm = (iso) => new Date(iso).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+const mins = (sec) => (sec < 90 ? "±1 menit" : `±${Math.round(sec / 60)} menit`);
+
+// /api/status -> running banner, warnings, failure banner, summary and the "Perbarui sekarang" button
+function showStatus(j) {
+  const prev = lastStatus;
+  lastStatus = j;
+  const p = j.progress || {};
+  const running = !!j.running;
   const box = $("#sync");
-  const running = !!(p && p.running);
+  box.hidden = !running;
+  box.classList.toggle("first", running && !j.items);
   if (running) {
-    box.hidden = false;
-    $("#sync-label").textContent = p.label || "Memperbarui";
-    const det = p.total ? `${p.done || 0}/${p.total}` : "";
-    $("#sync-sub").textContent = `Memperbarui dari GitHub · ${p.step || 1}/${p.steps || 4}${det ? " · " + det : ""}`;
-    const frac = ((p.step || 1) - 1 + (p.total ? (p.done || 0) / p.total : 0.5)) / (p.steps || 4);
+    $("#sync-label").textContent = !j.items ? "Katalog pertama sedang diambil" : (p.label || "Memperbarui katalog");
+    const parts = [];
+    if (!j.items && p.label) parts.push(p.label);
+    if (p.total) parts.push(`${p.done || 0}/${p.total}`);
+    if (j.started_at) parts.push(`mulai ${hhmm(j.started_at)}`);
+    if (j.eta_seconds) parts.push(`perkiraan ${mins(j.eta_seconds)} lagi`);
+    if (p.note) parts.push(p.note);
+    $("#sync-sub").textContent = parts.join(" · ");
+    const step = Math.max(p.step || 0, 0);
+    const frac = (Math.max(step - 1, 0) + (p.total ? (p.done || 0) / p.total : 0.5)) / (p.steps || 4);
     box.classList.toggle("indet", !p.total);
     $("#sync-fill").style.setProperty("--p", Math.max(0.04, Math.min(1, frac)).toFixed(3));
-  } else {
-    box.hidden = true;
   }
-  if (wasRunning && !running) { toast("Data katalog sudah diperbarui"); load(true); }
+  // notes when idle: failure (red) first, then warnings (yellow)
+  const note = $("#cnote");
+  const msgs = [];
+  if (!running && j.last_error) msgs.push(["bad", `Pembaruan katalog gagal ${when(j.last_error.at)}: ${esc(j.last_error.message)}`]);
+  else if (!running && p.stale) msgs.push(["bad", esc(p.label)]);
+  if (!running && !j.items) msgs.push(["warn", "Belum ada data katalog. Data diambil saat agen pertama kali memakainya, atau klik <b>Perbarui sekarang</b>."]);
+  const warns = [];
+  if (j.unchecked) warns.push(`${j.unchecked} item belum diperiksa (kuota API GitHub habis)`);
+  if (j.summary && (j.summary.quota_exhausted || []).length) warns.push(`kuota API GitHub habis saat pembaruan terakhir`);
+  if (!j.token_active) warns.push("tanpa token GitHub (batas 60 request/jam)");
+  if (warns.length) msgs.push(["warn", warns.join(" · ") + ` <button class="pill" data-open-settings>Pasang token</button>`]);
+  note.hidden = !msgs.length;
+  note.innerHTML = msgs.map(([cls, m]) => `<p class="${cls}">${m}</p>`).join("");
+  note.querySelectorAll("[data-open-settings]").forEach((b) => (b.onclick = openSettings));
+  showUpgrade(j);
+  const s = j.summary;
+  $("#summary-line").textContent = s && s.at ? `Katalog diperbarui ${when(s.at)} · ${s.items ?? j.items} item${s.seconds ? ` · ${Math.round(s.seconds / 60) || 1} menit` : ""}` : "";
+  const btn = $("#refresh-now");
+  btn.hidden = !j.actions_allowed;
+  btn.disabled = running || j.cooldown_left > 0;
+  btn.title = running ? "Pembaruan sedang berjalan" : j.cooldown_left > 0 ? `Bisa lagi dalam ${Math.ceil(j.cooldown_left / 60)} menit` : "Ambil data terbaru dari GitHub sekarang";
+  // a finished run: only a real new last_run is "updated"; a failure says so instead
+  if (wasRunning && !running && prev && prev.progress && prev.progress.source === "upgrade") {
+    toast("Upgrade Agent Loadout selesai; mulai ulang web UI dan sesi agen untuk memakai versi baru");
+  } else if (wasRunning && !running) {
+    if (j.last_error) toast("Pembaruan katalog gagal, lihat pesan merah");
+    else if (j.last_run && (!prev || !prev.last_run || prev.last_run.at !== j.last_run.at)) { toast("Data katalog sudah diperbarui"); load(true); }
+    else toast("Pembaruan katalog berhenti");
+  } else if (!running && prev && j.last_run && prev.last_run && prev.last_run.at !== j.last_run.at) { load(true); }
   wasRunning = running;
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(pollStatus, running ? 4000 : 60000);
+  syncTimer = setTimeout(pollStatus, running ? 4000 : 20000);
+}
+
+// new Agent Loadout release (from the server's cached check; no button: upgrades run in a terminal, K8)
+function showUpgrade(j) {
+  const box = $("#upnote");
+  const u = j.update;
+  const parts = [];
+  if (j.stale) parts.push(`<p class="warn">${esc(j.stale)}</p>`);
+  if (u && localStorage.getItem("al-hide-upgrade") !== u.latest) {
+    parts.push(`<div class="upg"><p class="info"><b>Versi baru tersedia: v${esc(u.latest)}</b> (sekarang v${esc(u.current)}).
+      Jalankan di terminal laptop: <code class="cmd">${esc(u.command)}</code>
+      <button class="pill" data-copy>Salin</button> <button class="pill" data-hide>Tutup</button></p>
+      ${u.notes ? `<details><summary>Apa yang berubah</summary><pre class="notes">${esc(u.notes)}</pre><small>${esc(u.notes_label)}</small></details>` : ""}</div>`);
+  }
+  box.hidden = !parts.length;
+  box.innerHTML = parts.join("");
+  const c = box.querySelector("[data-copy]");
+  if (c) c.onclick = async () => { try { await navigator.clipboard.writeText(u.command); toast("Perintah disalin"); } catch { toast(u.command); } };
+  const h = box.querySelector("[data-hide]");
+  if (h) h.onclick = () => { localStorage.setItem("al-hide-upgrade", u.latest); box.hidden = true; };
 }
 
 async function pollStatus() {
-  if (document.hidden) { syncTimer = setTimeout(pollStatus, 15000); return; }
+  if (document.hidden) { clearTimeout(syncTimer); syncTimer = setTimeout(pollStatus, 15000); return; }
   try {
     const r = await fetch("/api/status");
     if (r.status === 401) { location.href = "/login"; return; }
-    const j = await r.json();
-    if (!wasRunning && j.last_run && state.meta.last_run && j.last_run.at !== state.meta.last_run.at) { load(true); return; }
-    showSync(j.progress);
-  } catch { syncTimer = setTimeout(pollStatus, 15000); }
+    showStatus(await r.json());
+  } catch { clearTimeout(syncTimer); syncTimer = setTimeout(pollStatus, 15000); }
 }
+
+$("#refresh-now").addEventListener("click", async (ev) => {
+  if (lastStatus && !lastStatus.token_active && !confirm("Tanpa token GitHub, kuota hanya 60 request/jam dan item yang belum diperiksa bisa bertambah. Tetap perbarui?")) return;
+  ev.target.disabled = true;
+  try { const r = await api("/api/refresh", {}); toast(r.warning ? "Pembaruan dimulai · " + r.warning : "Pembaruan katalog dimulai"); }
+  catch (e) { toast("Gagal: " + e.message); }
+  setTimeout(pollStatus, 800);
+});
 
 function moveSeg() {
   const on = $("#tabs button.on"), ind = $(".seg-ind");
@@ -489,7 +558,7 @@ $("#tabs").addEventListener("click", (e) => {
 });
 let qTimer;
 $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(() => render(false), 140); });
-["#cat", "#sort", "#f-install", "#f-safe", "#f-installed"].forEach((s) => $(s).addEventListener("change", () => render()));
+["#cat", "#sort", "#f-install", "#f-safe", "#f-installed", "#f-unchecked"].forEach((s) => $(s).addEventListener("change", () => render()));
 new IntersectionObserver((ents) => { if (ents.some((e) => e.isIntersecting)) appendMore(); }, { rootMargin: "600px" }).observe($("#sentinel"));
 $("#grid").addEventListener("click", (e) => { const c = e.target.closest(".card"); if (c) openDetail(c.dataset.id); });
 $("#fresh").addEventListener("click", (e) => { const c = e.target.closest(".mini-card"); if (c) openDetail(c.dataset.id); });
@@ -524,15 +593,72 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetai
 loadHarnesses();
 refreshPlans(); setInterval(() => { if (!document.hidden) refreshPlans(); }, 15000);
 $("#pending").addEventListener("click", openPending);
-$("#security").addEventListener("click", openSecurity);
+$("#settings").addEventListener("click", openSettings);
 
 // ---------------------------------------------------------------- security page
 // Only shows status, logs out every device, and changes an existing hashed password.
 // Creating or resetting the password and anything about the PIN happen in the terminal only.
 const when = (iso) => (iso ? new Date(iso).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" }) : "-");
-async function openSecurity() {
-  let s;
-  try { s = await (await fetch("/api/security")).json(); } catch (e) { return toast("Gagal: " + e.message); }
+// ---------------------------------------------------------------- settings: GitHub token + security
+// The token is only ever sent in a POST body, never shown again; the page only gets its kind and last 4.
+const SRC_NAME = { env: "variabel GITHUB_TOKEN", env_file: "variabel GITHUB_TOKEN_FILE", managed: "disimpan di sini / set-token", config: "token_file di config.toml" };
+function tokenHtml(t) {
+  if (t.error) return `<h2>Pengaturan</h2><h3>Token GitHub</h3><p class="note warn">${esc(t.error)}</p>`;
+  const chk = t.last_check || {};
+  const exp = chk.expires ? when(chk.expires) : chk.expires_raw ? esc(chk.expires_raw) : null;
+  const status = t.active
+    ? `Aktif dari <b>${esc(SRC_NAME[t.active] || t.active)}</b> · ${esc(t.kind || "?")} · …${esc(t.last4 || "?")}${exp ? ` · kedaluwarsa ${exp}` : ""}${chk.core ? ` · batas ${chk.core.limit}/jam` : ""}`
+    : "Belum ada token. Tanpa token, GitHub hanya memberi 60 request/jam, jadi sebagian item bisa belum diperiksa.";
+  const managed = t.sources.find((x) => x.source === "managed");
+  const shadow = managed && managed.shadowed ? `<p class="note warn">Token yang disimpan di sini <b>tidak dipakai</b>, karena ${esc(SRC_NAME[t.active])} menimpanya.</p>` : "";
+  const scopes = chk.scopes && chk.scopes.length ? `<p class="note warn">Token classic ini punya scope ${esc(chk.scopes.join(", "))}; Agent Loadout tidak butuh scope apa pun.</p>` : "";
+  return `<h2>Pengaturan</h2><h3>Token GitHub</h3><p class="note">${status}</p>${shadow}${scopes}
+    <ul class="changes">${t.sources.map((x) => `<li><b>${x.active ? "✓" : x.present ? "·" : "–"} ${esc(SRC_NAME[x.source] || x.source)}</b><span>${x.active ? "dipakai" : x.shadowed ? "ada, tertimpa" : x.present ? "ada" : "kosong"}</span></li>`).join("")}</ul>
+    <p class="note">Urutan: variabel GITHUB_TOKEN → GITHUB_TOKEN_FILE → disimpan di sini → token_file config.</p>
+    <form class="tokform"><input type="password" name="token" autocomplete="off" spellcheck="false" placeholder="Tempel token GitHub (ghp_… atau github_pat_…)">
+      <div class="actions"><button class="btn primary" type="submit" data-act="save">Simpan & uji</button><button class="btn ghost" type="button" data-act="test">Uji</button>${managed && managed.present ? '<button class="btn ghost" type="button" data-act="clear">Hapus</button>' : ""}</div></form>
+    <div class="tok-res"></div>
+    <p class="note">Saran: <a href="${esc(t.hint.url)}" target="_blank" rel="noopener noreferrer">token fine-grained</a>, Repository access = <b>Public repositories (read-only)</b>, tanpa izin akun, kedaluwarsa 90 hari. Alternatif: <a href="${esc(t.hint.classic_url)}" target="_blank" rel="noopener noreferrer">token classic</a> tanpa scope. Jangan pernah menempel token di chat agen.</p>`;
+}
+
+function wireToken(root) {
+  const f = root.querySelector(".tokform");
+  if (!f) return;
+  const out = root.querySelector(".tok-res");
+  const show = (r) => {
+    const t = r.test || {};
+    const exp = t.expires ? when(t.expires) : t.expires_raw ? esc(t.expires_raw) : "";
+    out.innerHTML = `<p class="note ${t.ok === false ? "warn" : ""}">${t.ok ? `OK · batas ${t.core ? t.core.limit : "?"}/jam, sisa ${t.core ? t.core.remaining : "?"}${exp ? " · kedaluwarsa " + exp : ""}${t.kind ? " · " + esc(t.kind) + " …" + esc(t.last4) : " · tanpa token"}` : esc(t.error || "")}</p>${t.warning ? `<p class="note warn">${esc(t.warning)}</p>` : ""}`;
+  };
+  const go = async (act) => {
+    const token = f.token.value.trim();
+    f.token.value = "";
+    try {
+      if (act === "clear") { const r = await api("/api/settings/token/clear", {}); toast(r.note); return openSettings(); }
+      if (act === "save" && !token) return toast("Tempel token dulu");
+      const r = await api(act === "save" ? "/api/settings/token" : "/api/settings/token/test", token ? { token } : {});
+      if (r.saved) { toast("Token disimpan"); await openSettings(); show(r); pollStatus(); } else show(r);
+    } catch (e) { out.innerHTML = `<p class="note warn">${esc(e.message)}</p>`; }
+  };
+  f.onsubmit = (ev) => { ev.preventDefault(); go("save"); };
+  f.querySelectorAll("button[type=button]").forEach((b) => (b.onclick = () => go(b.dataset.act)));
+}
+
+async function openSettings() {
+  let s, t;
+  try {
+    s = await (await fetch("/api/security")).json();
+    const tr = await fetch("/api/settings/token");
+    t = await tr.json();
+  } catch (e) { return toast("Gagal: " + e.message); }
+  const sec = securityHtml(s);
+  $("#detail").innerHTML = `<div class="detail security">${tokenHtml(t)}${sec}</div>`;
+  wireToken($("#detail"));
+  wireSecurity();
+  const sh = $("#sheet"); sh.classList.remove("closing"); sh.hidden = false; document.body.style.overflow = "hidden";
+}
+
+function securityHtml(s) {
   const pw = s.password || {}, pin = s.pin || {};
   const pwText = { hashed: `Aktif (hash), dipasang ${esc(when(pw.set_at))} oleh ${esc(pw.set_by || "-")}${pw.reset_at ? ` · direset ${esc(when(pw.reset_at))}` : ""}`,
     legacy_file: "Aktif dari file teks (password_file). Jalankan <code>agentloadout set-password</code> di laptop untuk menyimpannya sebagai hash.",
@@ -540,7 +666,7 @@ async function openSecurity() {
   const pinText = !pin.set ? "Belum diset: <code>agentloadout set-pin</code> di terminal laptop."
     : pin.invalid ? "Catatan PIN rusak, persetujuan terkunci: <code>agentloadout set-pin --reset</code>."
     : `Diset ${esc(when(pin.set_at))} oleh ${esc(pin.set_by || "-")}${pin.reset_at ? ` · <b>direset ${esc(when(pin.reset_at))}</b>` : ""}${pin.locked ? " · terkunci sementara (5× salah)" : ""}`;
-  $("#detail").innerHTML = `<div class="detail security"><h2>Keamanan</h2>
+  return `<h2 class="sec-h">Keamanan</h2>
     <p class="lead">Akses ini: ${s.scope === "local" ? "dari laptop ini" : "dari luar laptop"}${s.https ? " (HTTPS)" : ""}${s.funnel ? " · lewat Funnel (hanya lihat)" : ""}.</p>
     <h3>Password web</h3><p class="note">${pwText}</p>
     ${pw.source === "hashed" && s.actions_allowed ? `<form class="pwform"><input type="password" name="old" autocomplete="current-password" placeholder="Password lama" required>
@@ -550,7 +676,10 @@ async function openSecurity() {
     ${pw.enabled && s.actions_allowed ? `<div class="actions"><button class="btn ghost" data-logoutall>Keluar dari semua perangkat</button></div>` : ""}
     <p class="note">Lupa password? Di terminal laptop: <code>agentloadout set-password --reset</code>.</p>
     <h3>PIN persetujuan</h3><p class="note">${pinText}</p>
-    <p class="note">PIN hanya bisa dibuat, diganti, atau direset di terminal laptop (<code>agentloadout set-pin</code>, <code>set-pin --reset</code>). Jangan berikan PIN ke agen.</p></div>`;
+    <p class="note">PIN hanya bisa dibuat, diganti, atau direset di terminal laptop (<code>agentloadout set-pin</code>, <code>set-pin --reset</code>). Jangan berikan PIN ke agen.</p>`;
+}
+
+function wireSecurity() {
   const f = $("#detail .pwform");
   if (f) f.onsubmit = async (ev) => {
     ev.preventDefault();
@@ -561,6 +690,5 @@ async function openSecurity() {
   };
   const lo = $("#detail [data-logoutall]");
   if (lo) lo.onclick = async () => { try { const r = await api("/api/security/logout-all"); toast(r.note || "Selesai"); } catch (e) { toast("Gagal: " + e.message); } };
-  const sh = $("#sheet"); sh.classList.remove("closing"); sh.hidden = false; document.body.style.overflow = "hidden";
 }
 load().catch((e) => { $("#updated").textContent = "Gagal memuat: " + e.message; $("#grid").innerHTML = '<p class="empty">Gagal memuat data. Coba muat ulang.</p>'; });

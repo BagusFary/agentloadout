@@ -62,6 +62,52 @@ def _safe_path(root: Path) -> str:
     return f"{bindir}:/usr/bin:/bin"
 
 
+class _GitHubMock:
+    """Fake api.github.com /rate_limit for token tests. Tokens containing GOOD are accepted, others get 401.
+    ghp_ tokens with SCOPE report scopes; github_pat_ tokens report an expiry (ODDEXP: an unknown format)."""
+
+    def __init__(self):
+        import http.server
+        import threading
+        mock = self
+        self.seen = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                auth = self.headers.get("Authorization", "")
+                tok = auth.split(" ", 1)[1] if auth.startswith("Bearer ") else ""
+                mock.seen.append(tok[-4:] if tok else "")
+                if tok and "GOOD" not in tok:
+                    body, code, hdrs = b'{"message":"Bad credentials"}', 401, {}
+                else:
+                    limit = 5000 if tok else 60
+                    body = json.dumps({"resources": {"core": {"limit": limit, "remaining": limit - 1, "reset": 2000000000, "used": 1},
+                                                     "search": {"limit": 30 if tok else 10, "remaining": 9, "reset": 2000000000, "used": 1}}}).encode()
+                    code, hdrs = 200, {}
+                    if tok.startswith("ghp_"):
+                        hdrs["X-OAuth-Scopes"] = "repo, gist" if "SCOPE" in tok else ""
+                    if tok.startswith("github_pat_"):
+                        hdrs["GitHub-Authentication-Token-Expiration"] = "kira-kira Februari" if "ODDEXP" in tok else "2027-02-14 10:00:00 UTC"
+                self.send_response(code)
+                for k, v in hdrs.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+
+GITHUB = _GitHubMock()
+os.environ["AGENTLOADOUT_GITHUB_API"] = GITHUB.url  # this pytest process never talks to the real GitHub
+
+
 class Sandbox:
     def __init__(self, root: Path):
         self.root = root
@@ -71,6 +117,7 @@ class Sandbox:
         self.port = free_port()
         env = {k: v for k, v in os.environ.items() if k not in _SCRUB and not k.startswith(_SCRUB_PREFIXES)}
         env.update(HOME=str(self.home), AGENTLOADOUT_HOME=str(self.al), AGENTLOADOUT_PORT=str(self.port),
+                   AGENTLOADOUT_GITHUB_API=GITHUB.url,
                    UV_TOOL_DIR=str(root / "uv" / "tools"), UV_TOOL_BIN_DIR=str(root / "uv" / "bin"),
                    UV_CACHE_DIR=str(root / "uv" / "cache"), UV_PYTHON_DOWNLOADS="never",
                    PATH=_safe_path(root), PYTHONUNBUFFERED="1", LANG="C.UTF-8")
@@ -89,9 +136,9 @@ class Sandbox:
             raise AssertionError(f"python failed: {r.stderr}")
         return r
 
-    def pty(self, *args, answers=(), extra_env=None, timeout=60):
+    def pty(self, *args, answers=(), extra_env=None, timeout=60, exe=None):
         """Run the CLI on a pseudo-terminal; answers = [(prompt substring, text to type), ...]."""
-        argv = [sys.executable, "-m", "agentloadout.cli", *args]
+        argv = [exe, *args] if exe else [sys.executable, "-m", "agentloadout.cli", *args]
         env = {**self.env, **(extra_env or {})}
         pid, fd = pty.fork()
         if pid == 0:  # child

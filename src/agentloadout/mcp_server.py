@@ -80,12 +80,13 @@ def maybe_refresh() -> str:
     if refresh.running():
         return "katalog sedang diperbarui di latar belakang" + (" (belum ada data, coba lagi beberapa menit)" if age is None else "")
     if age is None or age > limit or (unchecked and age > 1):
-        refresh.start_background()
+        refresh.start_background(source="mcp")
         return "katalog sedang diperbarui di latar belakang" + (" (belum ada data, coba lagi beberapa menit)" if age is None else "")
     note = f"katalog diperbarui {age:.0f} jam lalu"
     if unchecked:
         note += (f"; {unchecked} item belum diperiksa (kuota API GitHub habis) — dilengkapi otomatis "
-                 "pada pembaruan berikutnya; token GitHub mempercepatnya")
+                 "pada pembaruan berikutnya; token GitHub mempercepatnya (pengguna memasangnya di Pengaturan web atau "
+                 "`agentloadout set-token`; jangan pernah meminta token di chat)")
     return note
 
 
@@ -106,7 +107,29 @@ def search_catalog(query: str = "", kind: str = "", category: str = "", sort: st
     sql += f" ORDER BY {order} LIMIT ?"
     args.append(max(1, min(int(limit), 50)))
     rows = db.connect().execute(sql, args).fetchall()
-    return {"catalog": status, "results": [_row(r) for r in rows]}
+    out = {"catalog": status, "results": [_row(r) for r in rows]}
+    out.update(_version_notes(once=True))
+    return out
+
+
+_NOTIFIED = [False]
+
+
+def _version_notes(once: bool) -> dict:
+    """Cache-only notes for the agent: a newer release, or this process running older code than the disk."""
+    from . import selfupdate
+    out = {}
+    stale = selfupdate.stale_process_note()
+    if stale:
+        out["agentloadout_stale"] = stale
+    n = selfupdate.notice()
+    if n and not (once and _NOTIFIED[0]):
+        _NOTIFIED[0] = True
+        out["agentloadout_update"] = {
+            "message": f"Agent Loadout {n['latest']} tersedia (sekarang {n['current']}). Beri tahu pengguna; "
+                       f"perbarui hanya atas permintaannya: {n['command']}.",
+            "changes": n["notes"][:600], "changes_label": n["notes_label"]}
+    return out
 
 
 @server.tool()
@@ -132,7 +155,11 @@ def inspect_repo(item_id: str, skill_path: str = "") -> dict:
 @server.tool()
 def list_harnesses() -> dict:
     """Agent harnesses found on this computer and where their MCP config and skills live."""
-    return {"harnesses": [a.info() for a in harness.ADAPTERS.values()],
+    from . import selfupdate
+    c = selfupdate.read_cache() or {}
+    return {"agentloadout": {"version": __version__, "latest": c.get("latest"), "newer": bool(c.get("newer"))},
+            **_version_notes(once=False),
+            "harnesses": [a.info() for a in harness.ADAPTERS.values()],
             "skill_locations": {k: {"dir": str(v["dir"]), "read_by": v["read_by"]} for k, v in harness.SKILL_LOCATIONS.items()}}
 
 
@@ -244,7 +271,8 @@ def open_dashboard() -> dict:
         return {"running": False, "error": "web UI tidak bisa dijalankan (port terpakai?). Minta pengguna menjalankan "
                                            "`agentloadout ui` di terminal dan membaca pesannya."}
     return {"url": f"http://{ui['host']}:{ui['port']}/", "running": True,
-            "note": "Buka alamat ini di browser untuk melihat katalog dan menyetujui rencana (dengan PIN)."}
+            "note": "Buka alamat ini di browser untuk melihat katalog dan menyetujui rencana (dengan PIN).",
+            **_version_notes(once=False)}
 
 
 def main():

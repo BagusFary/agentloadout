@@ -5,13 +5,15 @@
   agentloadout uninstall [--yes]                   remove it again (your config backups stay)
   agentloadout set-pin [--reset]                   set, change or reset the approval PIN (human, own terminal)
   agentloadout set-password [--reset | --off]      web UI password, needed to open it from a phone (human)
+  agentloadout set-token [--from-env|--clear|--test]  GitHub token (raises the API limit; never in chat)
+  agentloadout upgrade [--check] [--to vX.Y.Z] [--yes] [--pre]   upgrade Agent Loadout itself (uv tool installs)
   agentloadout ui [--on-demand] [--port N]         local web catalog (http://127.0.0.1:8787)
   agentloadout plans | approve <id> | reject <id>  review install plans made by agents
   agentloadout refresh | backup | restore [file] | check-updates | where | harnesses
   agentloadout mcp                                 MCP server over stdio (harnesses run this)
 
 Install from GitHub (there is no PyPI release; the PyPI package named `agentloadout` is not ours):
-  uv tool install "git+https://github.com/BagusFary/agentloadout@v0.3.0"
+  uv tool install "git+https://github.com/BagusFary/agentloadout@v0.4.0"
   "$(uv tool dir --bin)/agentloadout" setup --yes
 """
 from __future__ import annotations
@@ -94,19 +96,40 @@ def _need_yes(a, what: str) -> int:
     return 0
 
 
-def _save_token_from_env() -> str | None:
-    from . import paths
-    tok = (os.environ.get("GITHUB_TOKEN") or "").strip()
-    if not tok:
-        print("  ! --token-from-env: GITHUB_TOKEN kosong, token tidak disimpan.", file=sys.stderr)
-        return None
-    f = paths.home() / "github_token"
-    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(tok + "\n")
-    if os.name != "nt":
-        f.chmod(0o600)
-    return str(f)
+def _store_token(token: str, by: str, test: bool = True) -> int:
+    """Test (when possible) and save a token. A token GitHub rejects (401) is not saved. Never prints it."""
+    from . import github_check, token_store
+    if not token_store.valid_format((token or "").strip()):
+        print("  ✗ format token tidak dikenali (20–255 karakter huruf/angka/_); tidak disimpan.", file=sys.stderr)
+        return 2
+    token = token.strip()
+    res = github_check.test(token) if test else {"ok": None, "error": "tidak diuji"}
+    if res.get("ok") is False:
+        print(f"  ✗ {res['error']}. Token tidak disimpan.", file=sys.stderr)
+        return 2
+    token_store.save(token, by)
+    if res.get("ok"):
+        token_store.save_check({**res, "kind": token_store.kind(token), "last4": token[-4:]})
+    kind = token_store.kind(token)
+    print(f"  ✓ token GitHub ({kind}, …{token[-4:]}) disimpan di {token_store.token_file()} (0600)")
+    if res.get("ok"):
+        core = res.get("core") or {}
+        print(f"    diuji: batas API {core.get('limit')}/jam, sisa {core.get('remaining')}"
+              + (f", kedaluwarsa {res.get('expires') or res.get('expires_raw')}" if res.get("expires_raw") else ""))
+        if res.get("scopes"):
+            print(f"    ! token classic ini punya scope {', '.join(res['scopes'])}; Agent Loadout tidak butuh scope apa pun.")
+    else:
+        print(f"    ! belum diuji: {res.get('error')}. Disimpan; uji lagi nanti: agentloadout set-token --test")
+    _warn_shadowed()
+    return 0
+
+
+def _warn_shadowed():
+    from . import config
+    info = config.github_token_info()
+    if info["active"] in ("env", "env_file"):
+        print(f"    ! token ini tidak dipakai selama {dict((s['source'], s['label']) for s in info['sources'])[info['active']]} "
+              "terisi di proses yang menjalankan Agent Loadout.")
 
 
 def cmd_setup(a):
@@ -155,15 +178,15 @@ def cmd_setup(a):
     _install_guide_skill(chosen, a.yes)
     config.write_default_config()
     if a.token_from_env:
-        f = _save_token_from_env()
-        if f:
-            print(f"  ✓ token GitHub disimpan di {f} (0600)")
+        if os.environ.get("GITHUB_TOKEN", "").strip():
+            _store_token(os.environ["GITHUB_TOKEN"], "cli-env")
+        else:
+            print("  ! --token-from-env: GITHUB_TOKEN kosong, token tidak disimpan.", file=sys.stderr)
     elif not config.github_token() and not a.yes and sys.stdin.isatty():
-        print("\nToken GitHub (opsional, tanpa scope) menaikkan batas API dari 60 ke 5.000 request/jam.")
+        print("\nToken GitHub (opsional, read-only) menaikkan batas API dari 60 ke 5.000 request/jam.")
         tok = getpass.getpass("Tempel token, atau Enter untuk lewati: ").strip()
         if tok:
-            os.environ["GITHUB_TOKEN"] = tok
-            print(f"  disimpan di {_save_token_from_env()}")
+            _store_token(tok, "cli")
     _offer_password(a)
     print("\nSelesai. Buka ulang harness-mu, lalu minta agen: \"cari MCP untuk postgres di Agent Loadout\".")
     if not pin.is_set():
@@ -333,6 +356,53 @@ def cmd_approve(a, approve=True):
     return 0
 
 
+def cmd_set_token(a):
+    """GitHub token: not a secret that guards approvals, so agents may run --from-env; never paste it in chat."""
+    from . import config, github_check, token_store
+    if a.clear:
+        removed = token_store.clear()
+        print("Token yang dikelola Agent Loadout dihapus." if removed else "Tidak ada token yang dikelola Agent Loadout.")
+        info = config.github_token_info()
+        if info["active"]:
+            label = dict((s["source"], s["label"]) for s in info["sources"])[info["active"]]
+            print(f"Masih ada token aktif dari {label}; ubah di sana kalau ingin menghapusnya.")
+        return 0
+    if a.test:
+        tok = config.github_token()
+        info = config.github_token_info()
+        res = github_check.test(tok or None)
+        src = info["active"] or "tanpa token"
+        if res.get("ok"):
+            core = res.get("core") or {}
+            if tok:
+                token_store.save_check({**res, "kind": info["kind"], "last4": info["last4"]})
+            print(f"OK ({src}{', ' + info['kind'] + ' …' + info['last4'] if tok else ''}): batas API {core.get('limit')}/jam, "
+                  f"sisa {core.get('remaining')}" + (f", kedaluwarsa {res.get('expires') or res.get('expires_raw')}" if res.get("expires_raw") else ""))
+            if res.get("scopes"):
+                print(f"! token classic ini punya scope {', '.join(res['scopes'])}; tidak dibutuhkan.")
+            return 0
+        print(f"Gagal ({src}): {res.get('error')}", file=sys.stderr)
+        return 2 if res.get("ok") is False else 1
+    if a.from_env:
+        if not os.environ.get("GITHUB_TOKEN", "").strip():
+            print("set-token --from-env: GITHUB_TOKEN kosong.", file=sys.stderr)
+            return 2
+        return _store_token(os.environ["GITHUB_TOKEN"], "cli-env")
+    if not sys.stdin.isatty():
+        print("set-token: tidak ada terminal untuk input tersembunyi. Pakai `GITHUB_TOKEN=... agentloadout set-token --from-env`,\n"
+              "atau menu Pengaturan di web. Jangan menempel token di chat.", file=sys.stderr)
+        return 2
+    try:
+        tok = getpass.getpass("Token GitHub (input tersembunyi): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nDibatalkan.", file=sys.stderr)
+        return 1
+    if not tok:
+        print("Dibatalkan.", file=sys.stderr)
+        return 1
+    return _store_token(tok, "cli")
+
+
 def _human_terminal(what: str) -> int:
     """Secrets are set by the human in their own terminal: refuse inside an agent or without a terminal."""
     from . import pin
@@ -472,6 +542,19 @@ def main(argv=None):
     p.add_argument("file", nargs="?")
     sub.add_parser("check-updates", help="check newer versions of installed items")
     sub.add_parser("where", help="show data, config and backup folders")
+    p = sub.add_parser("upgrade", help="upgrade Agent Loadout itself to the newest release (uv tool installs)")
+    p.add_argument("--check", action="store_true", help="only check for a newer release (no changes)")
+    p.add_argument("--to", metavar="vX.Y.Z", help="a specific release tag (terminal only; downgrades need a human)")
+    p.add_argument("--yes", "-y", action="store_true", help="no confirmation (agents: only to the newest release)")
+    p.add_argument("--pre", action="store_true", help="include pre-releases")
+    p.add_argument("--force-insecure", action="store_true", help=argparse.SUPPRESS)
+    p = sub.add_parser("update", help="did you mean `upgrade`? (catalog items: check-updates)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p = sub.add_parser("set-token", help="save, test or remove the GitHub token (raises the API limit)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--from-env", action="store_true", help="save $GITHUB_TOKEN (for agents; never paste a token in chat)")
+    g.add_argument("--clear", action="store_true", help="remove the token Agent Loadout manages")
+    g.add_argument("--test", action="store_true", help="test the active token against GitHub /rate_limit")
     a = ap.parse_args(argv)
 
     if a.cmd == "setup":
@@ -480,6 +563,15 @@ def main(argv=None):
         sys.exit(cmd_uninstall(a))
     if a.cmd == "set-pin":
         sys.exit(cmd_set_pin(a))
+    if a.cmd == "upgrade":
+        from . import selfupdate
+        sys.exit(selfupdate.upgrade(to=a.to, pre=a.pre, yes=a.yes, force_insecure=a.force_insecure, check_only=a.check))
+    if a.cmd == "update":
+        print("Maksud Anda `agentloadout upgrade`? (memperbarui Agent Loadout sendiri)\n"
+              "Untuk versi baru MCP/skill yang terpasang: `agentloadout check-updates`.", file=sys.stderr)
+        sys.exit(2)
+    if a.cmd == "set-token":
+        sys.exit(cmd_set_token(a))
     if a.cmd == "set-password":
         sys.exit(cmd_set_password(a))
     if a.cmd == "ui":
@@ -517,7 +609,14 @@ def main(argv=None):
         from . import config, paths, pin, web_password
         from .web import server as web
         print(f"data    : {paths.home()}\ncatalog : {paths.db_path()}\nbackups : {paths.backup_dir()}\nconfig  : {paths.config_file()}")
-        print(f"github token: {'set' if config.github_token() else 'not set (optional, raises API limit)'}")
+        ti = config.github_token_info()
+        if ti["active"]:
+            label = dict((x["source"], x["label"]) for x in ti["sources"])[ti["active"]]
+            shadow = [x["label"] for x in ti["sources"] if x["shadowed"]]
+            print(f"github token: set ({ti['kind']}, …{ti['last4'] or '?'}) dari {label}"
+                  + (f"; tertimpa: {', '.join(shadow)}" if shadow else ""))
+        else:
+            print("github token: not set (optional, raises API limit: `agentloadout set-token` or web Settings)")
         st = pin.status()
         if not st["set"]:
             print("approval PIN: not set (run `agentloadout set-pin` yourself)")
@@ -533,6 +632,20 @@ def main(argv=None):
                                   "off": "not set (web only on this computer; `agentloadout set-password`)"}[pw["source"]])
         ui = web.read_ui()
         print(f"web UI  : http://{ui['host']}:{ui['port']}/ (pid {ui['pid']})" if ui else "web UI  : not running (`agentloadout ui`)")
+        if ui and ui.get("version") and ui["version"] != __version__:
+            print(f"          ! web UI ini masih versi {ui['version']} (terpasang {__version__}): mulai ulang web UI")
+        from . import selfupdate
+        stuck = selfupdate.interrupted_note()
+        if stuck:
+            print("! " + stuck)
+        c = selfupdate.read_cache()
+        kind = selfupdate.install_kind()["kind"]
+        line = f"version : {__version__} ({kind})"
+        if c and c.get("latest"):
+            line += f"; terbaru {c['latest']}, dicek {c.get('checked_at')}" + (" -> `agentloadout upgrade`" if c.get("newer") and kind == "uv-tool-git" else "")
+        elif c and c.get("error"):
+            line += f"; cek versi terakhir gagal ({c['error'][:60]})"
+        print(line)
 
 
 if __name__ == "__main__":

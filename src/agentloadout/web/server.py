@@ -87,18 +87,55 @@ except Exception:  # noqa: BLE001
     installer = None
 
 
+REFRESH_COOLDOWN = 15 * 60  # seconds between "Perbarui sekarang" runs (K3)
+
+
 def load_progress(con):
-    p = db.get_meta(con, "progress") or {}
-    if p.get("running"):
-        try:
-            import datetime as _dt
-            age = (_dt.datetime.now(_dt.timezone.utc) - _dt.datetime.fromisoformat(p["at"])).total_seconds()
-            if age > 40 * 60:
-                p["running"] = False
-                p["label"] = "Berhenti (tidak ada kabar > 40 menit)"
-        except (KeyError, ValueError):
-            p["running"] = False
+    """Progress details from the meta; whether it runs comes from the refresh lock (a killed worker drops it)."""
+    from .. import refresh
+    p = dict(db.get_meta(con, "progress") or {})
+    locked = refresh.running()
+    if locked and not p.get("running"):
+        p.update(running=True, label="Memulai pembaruan", step=0, steps=4)
+    elif not locked and p.get("running"):
+        p.update(running=False, stale=True, label="Berhenti tanpa kabar (proses pembaruan sudah tidak berjalan)")
+    p["running"] = locked
     return p
+
+
+def _parse(iso):
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+
+
+def status_payload(con) -> dict:
+    """Everything the indicator needs; never contains a token."""
+    import datetime as _dt
+    from .. import refresh
+    p = load_progress(con)
+    lr = db.get_meta(con, "last_run") or None
+    err = db.get_meta(con, "last_error") or None  # a successful run clears it (collector.run)
+    started = p.get("started_at") if p["running"] else None
+    eta = None
+    if p["running"] and started and _parse(started) and p.get("source") != "upgrade":
+        elapsed = (_dt.datetime.now(_dt.timezone.utc) - _parse(started)).total_seconds()
+        if p.get("step") == 3 and p.get("total") and (p.get("done") or 0) / p["total"] >= 0.1:
+            eta = elapsed * (p["total"] - p["done"]) / max(p["done"], 1)
+        elif lr and lr.get("seconds") and bool(lr.get("token")) == bool(config.github_token()):
+            eta = lr["seconds"] - elapsed
+        eta = max(int(eta), 15) if eta is not None else None
+    items = con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+    unchecked = con.execute("SELECT COUNT(*) FROM items WHERE checked=0").fetchone()[0]
+    summary = None
+    if lr:
+        summary = {k: lr.get(k) for k in ("at", "seconds", "items", "counts", "unchecked", "token", "token_source",
+                                          "quota_exhausted", "source", "started_at")}
+    return {"running": p["running"], "progress": p, "started_at": started, "eta_seconds": eta,
+            "last_error": err, "last_run": lr, "summary": summary, "items": items, "unchecked": unchecked,
+            "token_active": bool(config.github_token()), "cooldown_left": refresh.cooldown_left(REFRESH_COOLDOWN)}
 
 
 def load_items():
@@ -126,8 +163,8 @@ def load_items():
 class Handler(BaseHTTPRequestHandler):
     server_version = "katalog-agen"
 
-    def log_message(self, fmt, *args):  # quieter log
-        sys.stderr.write("%s %s %s\n" % (self.client_ip(), self.command, self.path))
+    def log_message(self, fmt, *args):  # quieter log; the query string is never logged (may carry secrets)
+        sys.stderr.write("%s %s %s\n" % (self.client_ip(), self.command, urlparse(self.path).path))
 
     def send_body(self, code, body: bytes, ctype: str):
         if "gzip" in self.headers.get("Accept-Encoding", "") and len(body) > 1024:
@@ -138,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -287,6 +324,88 @@ class Handler(BaseHTTPRequestHandler):
                                          auth.make_cookie(self.https()))
         return self.send_json(404, {"error": "not found"})
 
+    # ------------------------------------------------------------------ GitHub token settings
+    def token_allowed(self) -> str | None:
+        """None when this request may manage the token, else the reason (K1: laptop, or a logged-in HTTPS
+        session that is not Funnel; plain-HTTP LAN would send the token unencrypted)."""
+        if not self.actions_allowed():
+            return "Pengaturan token hanya dari laptop ini atau dari sesi login (bukan lewat Funnel)."
+        if self.scope() == "external" and not self.https():
+            return "Dari luar laptop, token hanya boleh dikirim lewat HTTPS (misalnya tailscale serve), bukan HTTP biasa."
+        return None
+
+    def token_status(self) -> dict:
+        from .. import token_store
+        info = config.github_token_info()
+        info["hint"] = TOKEN_HINT
+        if info.get("managed") is None and token_store.token_file().exists():
+            info["managed"] = token_store.read_meta()
+        return info
+
+    def handle_token(self, path):
+        from .. import github_check, token_store
+        why = self.token_allowed()
+        if why:
+            return self.send_json(403, {"error": why})
+        try:
+            body = self.read_json(1024)
+        except ValueError as e:
+            return self.send_json(413 if "besar" in str(e) else 400, {"error": "body terlalu besar atau bukan JSON"})
+        given = body.get("token") if isinstance(body.get("token"), str) else ""
+        body.clear()
+        if path == "/api/settings/token/clear":
+            removed = token_store.clear()
+            st = self.token_status()
+            note = "Token yang dikelola Agent Loadout dihapus." if removed else "Tidak ada token yang dikelola Agent Loadout."
+            if st["active"]:
+                note += " Masih ada token aktif dari sumber lain (env/config); ubah di sana."
+            return self.send_json(200 if removed else 409, {"ok": removed, "note": note, "status": st})
+        if path not in ("/api/settings/token", "/api/settings/token/test"):
+            return self.send_json(404, {"error": "not found"})
+        if not TEST_LIMIT.allow():
+            return self.send_json(429, {"error": "Terlalu banyak uji token. Coba lagi dalam satu menit."})
+        save = path == "/api/settings/token"
+        token = given.strip()
+        if save or token:
+            if not token_store.valid_format(token):
+                return self.send_json(400, {"error": "Format token tidak dikenali (20–255 karakter huruf, angka, atau _)."})
+        else:
+            token = config.github_token()
+        res = github_check.test(token or None)
+        res.update(kind=token_store.kind(token) if token else None, last4=token[-4:] if token else None)
+        if res.get("scopes"):
+            res["warning"] = f"Token classic ini punya scope {', '.join(res['scopes'])}; Agent Loadout tidak butuh scope apa pun."
+        if save:
+            if res.get("ok") is False:
+                return self.send_json(400, {"error": res["error"] + ". Token tidak disimpan.", "test": res})
+            token_store.save(token, "web-local" if self.scope() == "local" else "web-luar")
+            if res.get("ok"):
+                token_store.save_check(res)
+            elif res.get("ok") is None:
+                res["warning"] = f"Disimpan tanpa diuji: {res.get('error')}. Uji lagi nanti."
+        elif token and token == config.github_token() and res.get("ok"):
+            token_store.save_check(res)
+        st = self.token_status()
+        if save and st["active"] in ("env", "env_file"):
+            res["warning"] = ("Disimpan, tetapi tidak dipakai: variabel lingkungan GITHUB_TOKEN/GITHUB_TOKEN_FILE di proses "
+                              "Agent Loadout menimpanya.")
+        return self.send_json(200 if res.get("ok") is not False else 400, {"test": res, "status": st, "saved": save})
+
+    def handle_refresh(self):
+        from .. import refresh
+        if not self.actions_allowed():
+            return self.send_json(403, {"error": "Perbarui sekarang hanya dari laptop ini atau sesi login (bukan lewat Funnel)."})
+        if refresh.running():
+            return self.send_json(409, {"error": "Pembaruan katalog sedang berjalan."})
+        left = refresh.cooldown_left(REFRESH_COOLDOWN)
+        if left:
+            return self.send_json(429, {"error": f"Tunggu {left // 60 + 1} menit lagi sebelum memperbarui lagi.", "retry_after": left})
+        if not refresh.start_background(source="web"):
+            return self.send_json(409, {"error": "Pembaruan katalog sedang berjalan."})
+        warn = None if config.github_token() else ("Tanpa token GitHub: kuota 60 request/jam, item yang belum diperiksa bisa "
+                                                   "bertambah. Pasang token di Pengaturan.")
+        return self.send_json(202, {"ok": True, "warning": warn})
+
     def send_json_cookie(self, code, obj, cookie):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -301,7 +420,13 @@ class Handler(BaseHTTPRequestHandler):
         LAST_REQUEST[0] = time.time()
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self.send_json(200, {"ok": True, "instance": INSTANCE[0] or paths.instance_id()})
+            out = {"ok": True, "instance": INSTANCE[0] or paths.instance_id()}
+            # the version only for this computer or a logged-in session: a public version helps pick old holes
+            if self.scope() == "local" or (auth.enabled() and self.authed()):
+                from .. import __version__, selfupdate
+                stale = selfupdate.stale_process_note()
+                out.update(version=__version__, **({"stale": stale} if stale else {}))
+            return self.send_json(200, out)
         if not self.gate(path):
             return
         if path == "/login":
@@ -319,9 +444,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, self.security_status())
         if path == "/api/status":
             con = db.connect()
-            res = {"progress": load_progress(con), "last_run": db.get_meta(con, "last_run")}
+            res = status_payload(con)
             con.close()
+            res["actions_allowed"] = self.actions_allowed()
+            from .. import selfupdate
+            res["update"] = selfupdate.notice()      # cache only, no network
+            res["stale"] = selfupdate.stale_process_note()
             return self.send_json(200, res)
+        if path == "/api/settings/token":
+            why = self.token_allowed()
+            if why:
+                return self.send_json(403, {"error": why})
+            return self.send_json(200, self.token_status())
         if path == "/api/harnesses":
             from .. import harness
             return self.send_json(200, {"harnesses": [h.info() for h in harness.ADAPTERS.values()]})
@@ -371,6 +505,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_plans(path)
         if path.startswith("/api/security/"):
             return self.handle_security(path)
+        if path.startswith("/api/settings/token"):
+            return self.handle_token(path)
+        if path == "/api/refresh":
+            return self.handle_refresh()
         if path != "/api/install":
             return self.send_json(404, {"error": "not found"})
         if not self.actions_allowed():
@@ -389,6 +527,32 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(code, res)
 
 
+TOKEN_HINT = {
+    "recommended": "Fine-grained token: Repository access = Public repositories (read-only), tanpa izin akun, kedaluwarsa 90 hari.",
+    "alternative": "Atau token classic tanpa scope apa pun.",
+    "url": "https://github.com/settings/personal-access-tokens/new",
+    "classic_url": "https://github.com/settings/tokens/new",
+}
+
+
+class RateLimit:
+    """At most `n` calls per `per` seconds for the whole instance (token tests reach GitHub)."""
+
+    def __init__(self, n, per):
+        import threading
+        self.n, self.per, self.calls, self.lock = n, per, [], threading.Lock()
+
+    def allow(self) -> bool:
+        now = time.time()
+        with self.lock:
+            self.calls = [t for t in self.calls if now - t < self.per]
+            if len(self.calls) >= self.n:
+                return False
+            self.calls.append(now)
+            return True
+
+
+TEST_LIMIT = RateLimit(10, 60)
 LAST_REQUEST = [0.0]
 INSTANCE = [""]
 PORT_TRIES = 10
@@ -470,7 +634,9 @@ def main(host=None, port=None, on_demand=False):
         return
     if note:
         print(note, file=sys.stderr, flush=True)
+    from .. import __version__
     paths.write_private(ui_file(), json.dumps({"host": shown, "port": port, "pid": os.getpid(), "instance": INSTANCE[0],
+                                               "version": __version__,
                                                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}))
     LAST_REQUEST[0] = time.time()
     idle = int(w.get("idle_shutdown_minutes") or 0) * 60

@@ -89,7 +89,7 @@ def test_without_tty_and_without_yes_exits_2(sb, cmd):
 
 # ------------------------------------------------------------------ token (H4) + default config
 def test_token_from_env_is_saved_0600_and_never_printed(sb):
-    token = "ghp_TESTONLY0123456789abcdefNOTREAL"
+    token = "ghp_TESTONLYGOOD0123456789abcdefNOTREAL"
     r = sb.cli("setup", "--yes", "--to", "cursor", "--token-from-env", extra_env={"GITHUB_TOKEN": token})
     assert r.returncode == 0, r.stderr
     f = sb.al / "github_token"

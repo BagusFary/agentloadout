@@ -3,8 +3,8 @@
 Example config.toml:
 
     [github]
-    # Optional. Default: env GITHUB_TOKEN, env GITHUB_TOKEN_FILE, then <data folder>/github_token
-    # (`agentloadout setup --token-from-env` writes that file). Set token_file only for another path:
+    # Optional. Order: env GITHUB_TOKEN > env GITHUB_TOKEN_FILE > <data folder>/github_token (saved in the
+    # web Settings menu or with `agentloadout set-token`) > token_file below.
     # token_file = "/path/to/github_token"
 
     [web]
@@ -62,14 +62,48 @@ def read_secret(path_value: str) -> str:
         return ""
 
 
+TOKEN_SOURCES = (
+    ("env", "variabel GITHUB_TOKEN"),
+    ("env_file", "variabel GITHUB_TOKEN_FILE"),
+    ("managed", "disimpan lewat Pengaturan / agentloadout set-token"),
+    ("config", "token_file di config.toml"),
+)
+
+
+def _token_candidates() -> list[tuple[str, str]]:
+    """(source id, token or "") in priority order: env > env file > managed file > config token_file."""
+    from . import token_store
+    return [("env", (os.environ.get("GITHUB_TOKEN") or "").strip()),
+            ("env_file", read_secret(os.environ.get("GITHUB_TOKEN_FILE", ""))),
+            ("managed", read_secret(str(token_store.token_file()))),
+            ("config", read_secret(load()["github"]["token_file"]))]
+
+
 def github_token() -> str:
-    if os.environ.get("GITHUB_TOKEN"):
-        return os.environ["GITHUB_TOKEN"].strip()
-    for candidate in (os.environ.get("GITHUB_TOKEN_FILE", ""), load()["github"]["token_file"], str(paths.home() / "github_token")):
-        t = read_secret(candidate)
-        if t:
-            return t
+    for _, tok in _token_candidates():
+        if tok:
+            return tok
     return ""
+
+
+def github_token_info() -> dict:
+    """Which token sources exist and which one is used. Never contains a token value (only its last 4)."""
+    from . import token_store
+    cands = _token_candidates()
+    active = next((src for src, tok in cands if tok), None)
+    sources = []
+    for (src, tok), (_, label) in zip(cands, TOKEN_SOURCES):
+        sources.append({"source": src, "label": label, "present": bool(tok), "active": src == active,
+                        "shadowed": bool(tok) and active is not None and src != active})
+    tok = next((t for s, t in cands if s == active), "")
+    info = {"active": active, "sources": sources, "kind": token_store.kind(tok) if tok else None,
+            "last4": tok[-4:] if len(tok) >= 12 else None}
+    if active == "managed" or any(s["source"] == "managed" and s["present"] for s in sources):
+        info["managed"] = token_store.read_meta()
+    check = token_store.read_check()
+    if check and tok and check.get("last4") == info["last4"]:
+        info["last_check"] = check
+    return info
 
 
 def web() -> dict:

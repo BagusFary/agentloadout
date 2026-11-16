@@ -1,6 +1,6 @@
 [project]
 name = "agentloadout"
-version = "0.3.0"
+version = "0.4.0"
 description = "Discover, vet, and equip trending MCP servers, agent skills, and AI-agent apps — for any agent harness."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,7 +26,7 @@ build-backend = "hatchling.build"
 packages = ["src/agentloadout"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+only-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml", "CHANGELOG.md"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 
-from . import db, paths  # noqa: E402
+from . import paths  # noqa: E402
 from .backup import default_dir  # noqa: E402
 
 SERVICE = "katalog-agen"
@@ -43,8 +43,12 @@ def main():
         root = default_dir()
         for kind in ("daily", "weekly"):
             folder = os.path.join(root, kind)
-            files = sorted(f for f in os.listdir(folder) if f.endswith(".db")) if os.path.isdir(folder) else []
-            print(f"{kind}:", *(os.path.join(folder, f) for f in files) or ["(kosong)"], sep="\n  ")
+            files = [f for f in os.listdir(folder) if f.endswith(".db")] if os.path.isdir(folder) else []
+            # oldest first, newest last; the day's first copy (katalog-<date>.db) is marked
+            files.sort(key=lambda f: (os.path.getmtime(os.path.join(folder, f)), f))
+            lines = [os.path.join(folder, f) + ("  (salinan pertama hari itu)" if kind == "daily" and len(f) == len("katalog-YYYY-MM-DD.db")
+                                                  else "") for f in files]
+            print(f"{kind}:", *lines or ["(kosong)"], sep="\n  ")
         return
 
     ok, counts = check(a.backup)
