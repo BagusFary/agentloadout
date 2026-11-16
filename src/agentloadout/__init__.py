@@ -1,2 +1,2 @@
 """Agent Loadout: discover, vet, and equip MCP servers, agent skills, and agent apps for any harness."""
-__version__ = "0.4.0"
+__version__ = "0.5.0"

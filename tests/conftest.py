@@ -10,10 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import pty
-import select
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -25,9 +22,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_MARKERS = ("CLAUDECODE", "AI_AGENT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_THREAD_ID",
-                 "OPENBOT_AGENT_PROCESS")
-_SCRUB_PREFIXES = ("XDG_", "UV_", "CLAUDE_", "CODEX_", "OPENBOT_", "AGENTLOADOUT_", "GITHUB_TOKEN", "VIRTUAL_ENV")
-_SCRUB = set(AGENT_MARKERS) | {"CLAUDECODE", "AI_AGENT", "CODEX_HOME"}
+                 "OPENBOT_AGENT_PROCESS", "GEMINI_CLI", "GEMINI_CLI_IN_SHELL", "OPENCODE", "CURSOR_AGENT")
+_SCRUB_PREFIXES = ("XDG_", "UV_", "CLAUDE_", "CODEX_", "OPENBOT_", "GEMINI_", "OPENCODE", "CURSOR_",
+                   "AGENTLOADOUT_", "GITHUB_TOKEN", "VIRTUAL_ENV")
+_SCRUB = set(AGENT_MARKERS) | {"CLAUDECODE", "AI_AGENT", "CODEX_HOME", "AGENT", "CI", "NO_COLOR"}
 
 # isolate this pytest process itself before any agentloadout module is imported
 _SESSION = Path(tempfile.mkdtemp(prefix="al-pytest-"))
@@ -60,6 +58,12 @@ def _safe_path(root: Path) -> str:
         if src and not (bindir / tool).exists():
             (bindir / tool).symlink_to(src)
     return f"{bindir}:/usr/bin:/bin"
+
+
+def fake_token(body: str, kind: str = "classic") -> str:
+    """A dummy GitHub token built at runtime (N7): no token-like literal ever sits in the repository."""
+    prefix = {"classic": "gh" + "p_", "fine-grained": "github" + "_pat_"}[kind]
+    return prefix + body
 
 
 class _GitHubMock:
@@ -136,37 +140,23 @@ class Sandbox:
             raise AssertionError(f"python failed: {r.stderr}")
         return r
 
-    def pty(self, *args, answers=(), extra_env=None, timeout=60, exe=None):
-        """Run the CLI on a pseudo-terminal; answers = [(prompt substring, text to type), ...]."""
+    def pty_run(self, *args, answers=(), extra_env=None, timeout=60, exe=None, cols=80, rows=24,
+                stdout_pipe=False, env=None) -> dict:
+        """Run the CLI on a pseudo-terminal through tests/pty_driver.py (a separate process, N6)."""
         argv = [exe, *args] if exe else [sys.executable, "-m", "agentloadout.cli", *args]
-        env = {**self.env, **(extra_env or {})}
-        pid, fd = pty.fork()
-        if pid == 0:  # child
-            try:
-                os.execvpe(argv[0], argv, env)
-            finally:
-                os._exit(127)
-        out, pos, i, deadline = b"", 0, 0, time.time() + timeout
-        answers = list(answers)
-        while time.time() < deadline:
-            r, _, _ = select.select([fd], [], [], 0.1)
-            if r:
-                try:
-                    chunk = os.read(fd, 4096)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                out += chunk
-            if i < len(answers) and answers[i][0].encode() in out[pos:]:
-                pos = len(out)
-                os.write(fd, (answers[i][1] + "\n").encode())
-                i += 1
-        else:
-            os.kill(pid, signal.SIGKILL)
-        _, status = os.waitpid(pid, 0)
-        os.close(fd)
-        return os.waitstatus_to_exitcode(status), out.decode(errors="replace")
+        spec = {"argv": argv, "env": env if env is not None else {**self.env, **(extra_env or {})},
+                "answers": [list(a) for a in answers], "timeout": timeout, "cols": cols, "rows": rows,
+                "stdout_pipe": stdout_pipe}
+        r = subprocess.run([sys.executable, str(ROOT / "tests" / "pty_driver.py")], input=json.dumps(spec),
+                           capture_output=True, text=True, timeout=timeout + 30)
+        if r.returncode != 0:
+            raise AssertionError(f"pty driver failed: {r.stderr[-2000:]}")
+        return json.loads(r.stdout)
+
+    def pty(self, *args, answers=(), extra_env=None, timeout=60, exe=None):
+        """Run the CLI on a pseudo-terminal; answers = [(prompt substring, text to type), ...] -> (rc, output)."""
+        res = self.pty_run(*args, answers=answers, extra_env=extra_env, timeout=timeout, exe=exe)
+        return (res["rc"] if res["rc"] is not None else -9), res["out"]
 
     # ---------------------------------------------------------------- data
     def catalog(self) -> Path:

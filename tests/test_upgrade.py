@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, fake_token
 
 pytestmark = pytest.mark.skipif(not shutil.which("uv") or not shutil.which("git"), reason="needs uv and git")
 
@@ -55,6 +55,17 @@ def repos(tmp_path_factory):
             continue
         (src / f).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / f, src / f)
+    # test releases are numbered 0.4.x whatever the working copy's version is, and real release tags newer
+    # than v0.3.0 (cloned from this repo) are dropped so the test tags can take their names
+    import re
+    for tag in run(["git", "tag", "-l"], cwd=src).stdout.split():
+        v = re.match(r"v(\d+)\.(\d+)\.(\d+)", tag)
+        if v and tuple(map(int, v.groups())) > (0, 3, 0):
+            run(["git", "tag", "-d", tag], cwd=src)
+    pp = src / "pyproject.toml"
+    pp.write_text(re.sub(r'(?m)^version = "[^"]+"', 'version = "0.4.0"', pp.read_text(), count=1))
+    init = src / "src/agentloadout/__init__.py"
+    init.write_text(re.sub(r'__version__ = "[^"]+"', '__version__ = "0.4.0"', init.read_text()))
     shas = {"v0.4.0": commit_tag(src, "test v0.4.0 (working copy)", "v0.4.0")}
     set_version(src, "0.4.1", "uji upgrade ke 0.4.1")
     shas["v0.4.1"] = commit_tag(src, "test v0.4.1", "v0.4.1")
@@ -125,7 +136,7 @@ def test_agent_upgrades_to_latest_and_downgrade_rules(sb, repos):
     (sb.home / ".cursor").mkdir()
     tool = Tool(sb, repos)
     assert tool.cli("setup", "--yes", "--to", "cursor").returncode == 0
-    (sb.al / "github_token").write_text("ghp_DUMMYGOOD0123456789abcdefghijkUPGR\n")
+    (sb.al / "github_token").write_text(fake_token("DUMMYGOOD0123456789abcdefghijkUPGR") + "\n")
     r = tool.cli("upgrade", "--yes", extra={"CLAUDECODE": "1"})  # an agent, on the user's request
     assert r.returncode == 0, r.stdout + r.stderr
     assert tool.state() == ("0.4.1", repos["shas"]["v0.4.1"])
@@ -135,7 +146,7 @@ def test_agent_upgrades_to_latest_and_downgrade_rules(sb, repos):
     assert h["status"] == "ok" and h["from"] == "0.4.0" and h["to"] == "0.4.1" and h["to_sha"] == repos["shas"]["v0.4.1"]
     bk = Path(h["backup"])
     assert (bk / "catalog.db").exists() and not (bk / "github_token").exists()
-    assert "ghp_DUMMY" not in "".join(p.read_text(errors="replace") for p in bk.rglob("*") if p.is_file() and p.suffix != ".db")
+    assert "DUMMYGOOD0123456789abcdefghijkUPGR" not in "".join(p.read_text(errors="replace") for p in bk.rglob("*") if p.is_file() and p.suffix != ".db")
     assert tool.cli("upgrade", "--yes").stdout.startswith("Sudah versi 0.4.1")
 
     # downgrades and --to: a human at a terminal only

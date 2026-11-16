@@ -4,6 +4,25 @@ All notable changes to Agent Loadout. Format: [Keep a Changelog](https://keepach
 versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the section of the new version
 (read from this file at the release commit), so every release needs an entry here (see RELEASING.md).
 
+## [0.5.0]
+
+### Added
+- Interactive menu: `agentloadout` without arguments (or `agentloadout menu`) in a terminal shows the
+  AGENTLOADOUT banner, a status line and 12 numbered choices (plans, web, refresh, status, token, PIN,
+  password, setup, upgrade, backup and restore, item updates, uninstall). Every choice runs the normal
+  command with its normal checks. Only for a human at a terminal; scripts and agents get the old usage +
+  exit 2. Idle limit 15 minutes. `AGENTLOADOUT_NO_MENU=1` turns it off.
+
+### Changed
+- More agent markers: `GEMINI_CLI`, `GEMINI_CLI_IN_SHELL`, `OPENCODE`, `CURSOR_AGENT` (they also block
+  `set-pin` and `set-password`); `AGENT` only keeps the menu away.
+- The CLI returns exit codes instead of exiting inside each command; `restore` no longer changes `sys.argv`.
+- The MCP tool `open_dashboard` and the menu share one way to start the web UI.
+
+### Fixed
+- Ctrl-C at a question (`Lanjutkan?`), at the PIN prompt of `approve`, or in `ui` ends with "Dibatalkan."
+  instead of a traceback (exit 130).
+
 ## [0.4.0] - 2026-11-16
 
 ### Added

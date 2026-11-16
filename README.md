@@ -121,6 +121,36 @@ the local web UI or in your own terminal, then the agent applies it.
 | `list_installed` | What is installed where |
 | `open_dashboard` | Start the local web UI and return its address |
 
+## Interactive menu
+
+Run `agentloadout` without arguments in your own terminal (or `agentloadout menu`) for a menu with the
+AGENTLOADOUT banner, a status line (version, PIN, web password, GitHub token source, catalog size, refresh)
+and numbered choices:
+
+```
+ Sehari-hari                         Pengaturan
+  1  Rencana menunggu (n)              5  Token GitHub
+  2  Buka web katalog                  6  PIN persetujuan
+  3  Perbarui katalog sekarang         7  Password web
+  4  Status lengkap
+ Instalasi & perawatan
+  8  Pasang ke harness  9  Cek & upgrade  10  Cadangan & pulihkan
+ 11  Cek versi baru item terpasang  12  Lepas Agent Loadout   0  Keluar
+```
+
+Every choice runs the normal command with its normal checks: approving still needs your PIN, upgrades only
+go to the newest release (`--to`, `--pre` and downgrades stay terminal-only commands), restore and uninstall
+ask you to type a confirmation word. The web catalog and a catalog refresh start in the background. After a
+successful upgrade the menu closes, because the program files changed; run `agentloadout` again.
+
+The menu appears only when stdin **and** stdout are a terminal, no agent marker is set (`CLAUDECODE`,
+`AI_AGENT`, `CODEX_*`, `OPENBOT_AGENT_PROCESS`, `GEMINI_CLI`, `OPENCODE`, `CURSOR_AGENT`, `AGENT`, ...),
+`TERM` is not `dumb` and `CI` is empty. Set `AGENTLOADOUT_NO_MENU=1` to switch it off. Everywhere else
+`agentloadout` without arguments prints the usage and exits with code 2, as before. Without input for 15
+minutes the menu closes itself. Ctrl-C or `0` leaves it; Ctrl-C inside a choice returns to the menu. The
+status line never uses the network and never creates the catalog. Output is plain ASCII; only the banner is
+coloured, and not with `NO_COLOR` set.
+
 ## Use it yourself
 
 ```bash

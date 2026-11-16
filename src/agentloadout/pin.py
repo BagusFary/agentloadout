@@ -35,7 +35,9 @@ SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
 
 # environment variables that agent harnesses set for the shell commands they run
 AGENT_MARKERS = ("CLAUDECODE", "AI_AGENT", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "CODEX_THREAD_ID",
-                 "OPENBOT_AGENT_PROCESS")
+                 "OPENBOT_AGENT_PROCESS",
+                 # Gemini CLI runs agent commands in a pty (node-pty); OpenCode and Cursor set these in agent shells
+                 "GEMINI_CLI", "GEMINI_CLI_IN_SHELL", "OPENCODE", "CURSOR_AGENT")
 RESET_BANNER_DAYS = 7
 
 _threads = threading.Lock()  # threads of the web server; processes use the file lock

@@ -8,14 +8,10 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
-import subprocess
-import sys
-import time
 
 from mcp.server.mcpserver import MCPServer
 
-from . import __version__, config, db, harness, paths, pin, plans, refresh
+from . import __version__, config, db, harness, pin, plans, refresh
 
 INSTRUCTIONS = """Agent Loadout: catalog of trending MCP servers, agent skills and agent apps from GitHub.
 Rules for agents:
@@ -244,29 +240,12 @@ def list_installed() -> dict:
             "harness_mcp": {a.id: sorted(a.list_mcp()) for a in harness.detected() if a.id != "openbot"}}
 
 
-def _own_ui() -> dict | None:
-    """ui.json of this data folder, if that UI is alive and really is this instance."""
-    from .web import server as web
-    ui = web.read_ui()
-    if ui and web.instance_at(ui.get("host", "127.0.0.1"), ui.get("port")) == paths.instance_id():
-        return ui
-    return None
-
-
 @server.tool()
 def open_dashboard() -> dict:
     """Start (or reuse) this Agent Loadout's local web UI and return its address. Never returns the address
     of another Agent Loadout instance or another program that happens to use the configured port."""
-    ui = _own_ui()
-    if not ui:
-        subprocess.Popen([sys.executable, "-m", "agentloadout.cli", "ui", "--on-demand"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-                         start_new_session=True, env=os.environ.copy())
-        for _ in range(50):
-            time.sleep(0.2)
-            ui = _own_ui()
-            if ui:
-                break
+    from .web import server as web
+    ui = web.ensure_ui()
     if not ui:
         return {"running": False, "error": "web UI tidak bisa dijalankan (port terpakai?). Minta pengguna menjalankan "
                                            "`agentloadout ui` di terminal dan membaca pesannya."}

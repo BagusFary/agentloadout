@@ -9,9 +9,9 @@ import time
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, fake_token
 
-DUMMY = "ghp_DUMMYGOOD0123456789abcdefghijkLEAK"
+DUMMY = fake_token("DUMMYGOOD0123456789abcdefghijkLEAK")
 FAKE_WORKER = "import sys, time; time.sleep(float(sys.argv[1]))"
 
 
