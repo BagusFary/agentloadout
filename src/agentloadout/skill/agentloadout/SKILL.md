@@ -43,6 +43,9 @@ MCP server (tools below) and the `agentloadout` command.
   - ask the user for their PIN or accept it in chat. If the user pastes it, tell them not to and to
     change it with `agentloadout set-pin`.
 - Never edit harness config files to bypass a plan.
+- GitHub token: never ask the user to paste a token into the chat and never print one. The user saves it in
+  the web Settings menu (Pengaturan) or with `agentloadout set-token` in their terminal. If the user already
+  exported GITHUB_TOKEN in your shell, you may run `agentloadout set-token --from-env`.
 - Items with `checked: false` were not fully examined yet (GitHub API quota); say so.
 - Prefer items with a license, recent updates, and no high-risk red flags. Say so when an item is risky.
 - OpenBot targets come back as instructions for an OpenBot agent (`openbot.*` tools).
@@ -52,5 +55,6 @@ MCP server (tools below) and the `agentloadout` command.
 - `agentloadout plans` / `approve <id>` / `reject <id>` — review agent plans
 - `agentloadout set-pin` / `set-pin --reset` — set, change or reset the approval PIN (the user, in their own terminal)
 - `agentloadout set-password` / `--reset` — web password, needed to open the web UI from a phone (the user)
+- `agentloadout set-token` / `--test` / `--clear` — GitHub token (raises the API limit; web: Pengaturan)
 - `agentloadout setup --yes` / `uninstall --yes` — register or remove the MCP server in harnesses;
   afterwards `uv tool uninstall agentloadout` removes the program

@@ -80,12 +80,13 @@ def maybe_refresh() -> str:
     if refresh.running():
         return "katalog sedang diperbarui di latar belakang" + (" (belum ada data, coba lagi beberapa menit)" if age is None else "")
     if age is None or age > limit or (unchecked and age > 1):
-        refresh.start_background()
+        refresh.start_background(source="mcp")
         return "katalog sedang diperbarui di latar belakang" + (" (belum ada data, coba lagi beberapa menit)" if age is None else "")
     note = f"katalog diperbarui {age:.0f} jam lalu"
     if unchecked:
         note += (f"; {unchecked} item belum diperiksa (kuota API GitHub habis) — dilengkapi otomatis "
-                 "pada pembaruan berikutnya; token GitHub mempercepatnya")
+                 "pada pembaruan berikutnya; token GitHub mempercepatnya (pengguna memasangnya di Pengaturan web atau "
+                 "`agentloadout set-token`; jangan pernah meminta token di chat)")
     return note
 
 

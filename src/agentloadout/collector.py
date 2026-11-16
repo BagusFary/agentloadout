@@ -35,6 +35,7 @@ def token() -> str:
 S = requests.Session()
 S.headers.update({"User-Agent": UA, "Accept": "application/vnd.github+json"})
 _tok = token()
+_tok_source = config.github_token_info()["active"] if _tok else None  # the token this run really uses
 if _tok:
     S.headers["Authorization"] = f"Bearer {_tok}"
 
@@ -45,6 +46,27 @@ class QuotaExhausted(RuntimeError):
 
 MAX_WAIT = 120
 QUOTA = {}  # resource ("core" | "search") -> reset epoch, set once the quota ran out
+WAIT = {"until": 0.0}  # short rate-limit pause in progress (shown as "Menunggu kuota GitHub sampai HH:MM")
+
+
+def _side_progress(**extra):
+    """Update the progress meta from any thread (own short connection); never fails the run."""
+    import sqlite3
+    try:
+        c = sqlite3.connect(str(paths.db_path()), timeout=5)
+        row = c.execute("SELECT value FROM meta WHERE key='progress'").fetchone()
+        cur = json.loads(row[0]) if row else {}
+        cur.update(extra)
+        c.execute("INSERT INTO meta(key, value) VALUES('progress', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (json.dumps(cur),))
+        c.commit()
+        c.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _hhmm(epoch: float) -> str:
+    return time.strftime("%H:%M", time.localtime(epoch))
 
 
 def _resource(path):
@@ -68,11 +90,15 @@ def gh_get(path, params=None, accept=None, ok404=True):
                 wait = reset - int(time.time()) + 2
             if wait > MAX_WAIT:
                 QUOTA[res] = time.time() + wait
-                print(f"  kuota API GitHub ({res}) habis sampai "
-                      f"{time.strftime('%H:%M', time.localtime(time.time() + wait))}; berhenti memakai API", flush=True)
+                print(f"  kuota API GitHub ({res}) habis sampai {_hhmm(time.time() + wait)}; berhenti memakai API", flush=True)
+                _side_progress(quota_until={k: int(v) for k, v in QUOTA.items()},
+                               note=f"Kuota API GitHub ({res}) habis sampai {_hhmm(time.time() + wait)}; lanjut tanpa API, "
+                                    "sisa item ditandai belum diperiksa")
                 raise QuotaExhausted(res)
             wait = max(5, wait)
             print(f"  rate limit, tunggu {wait}s", flush=True)
+            WAIT["until"] = max(WAIT["until"], time.time() + wait)
+            _side_progress(waiting_until=int(WAIT["until"]), note=f"Menunggu kuota GitHub sampai {_hhmm(WAIT['until'])}")
             time.sleep(wait)
             continue
         if r.status_code >= 500:
@@ -535,22 +561,40 @@ def translated(con, text):
     return row["text"] if row else None
 
 
+def _run_info() -> dict:
+    return {"started_at": os.environ.get("AGENTLOADOUT_REFRESH_STARTED") or STARTED[0],
+            "source": os.environ.get("AGENTLOADOUT_REFRESH_SOURCE") or "cli"}
+
+
+STARTED = [""]
+
+
 def progress(con, step, label, done=None, total=None, running=True):
-    db.set_meta(con, "progress", {
-        "running": running, "step": step, "steps": 4, "label": label, "done": done, "total": total,
-        "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-    })
+    p = {"running": running, "step": step, "steps": 4, "label": label, "done": done, "total": total,
+         "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **_run_info()}
+    if WAIT["until"] > time.time():
+        p.update(waiting_until=int(WAIT["until"]), note=f"Menunggu kuota GitHub sampai {_hhmm(WAIT['until'])}")
+    if QUOTA:
+        p["quota_until"] = {k: int(v) for k, v in QUOTA.items()}
+        p.setdefault("note", "Kuota API GitHub habis; lanjut tanpa API, sisa item ditandai belum diperiksa")
+    db.set_meta(con, "progress", p)
     con.commit()
 
 
 def main():
     t0 = time.time()
+    STARTED[0] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     con = db.connect()
     try:
         run(con, t0)
-    except BaseException:
+    except BaseException as e:
         con.rollback()  # drop the unfinished batch; finished batches stay (a later run continues)
         progress(con, 0, "Berhenti sebelum selesai (yang sudah tersimpan tetap ada)", running=False)
+        if not os.environ.get("AGENTLOADOUT_REFRESH_STARTED"):  # run_locked records it otherwise
+            from .refresh import now_iso, sanitize
+            db.set_meta(con, "last_error", {"at": now_iso(), "message": sanitize(str(e) or type(e).__name__),
+                                            "source": _run_info()["source"]})
+            con.commit()
         raise
 
 
@@ -644,9 +688,12 @@ def run(con, t0):
     con.execute("DELETE FROM items WHERE updated_at < ?", ((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat(),))
     counts = {k: v for k, v in con.execute("SELECT kind, COUNT(*) FROM items GROUP BY kind")}
     unchecked = con.execute("SELECT COUNT(*) FROM items WHERE checked=0").fetchone()[0]
-    db.set_meta(con, "last_run", {"at": now, "seconds": round(time.time() - t0), "counts": counts,
-                                  "unchecked": unchecked, "token": bool(_tok)})
-    db.set_meta(con, "progress", {"running": False, "step": 4, "steps": 4, "label": "Selesai", "at": now})
+    finished = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")  # real end, not the start of saving
+    db.set_meta(con, "last_run", {"at": finished, "seconds": round(time.time() - t0), "counts": counts,
+                                  "items": sum(counts.values()), "unchecked": unchecked, "token": bool(_tok),
+                                  "token_source": _tok_source, "quota_exhausted": sorted(QUOTA), **_run_info()})
+    db.set_meta(con, "progress", {"running": False, "step": 4, "steps": 4, "label": "Selesai", "at": finished, **_run_info()})
+    db.set_meta(con, "last_error", None)
     con.commit()
     print(f"selesai dalam {round(time.time() - t0)} detik: {counts}" + (f", belum diperiksa: {unchecked}" if unchecked else ""), flush=True)
 

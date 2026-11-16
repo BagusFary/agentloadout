@@ -17,7 +17,7 @@ Paste this to your agent (Claude Code, Codex, Cursor, Gemini CLI, OpenCode):
 **1. Install and register** (the agent can run this; nothing here needs a person):
 
 ```bash
-uv tool install "git+https://github.com/BagusFary/agentloadout@v0.3.0"
+uv tool install "git+https://github.com/BagusFary/agentloadout@v0.4.0"
 "$(uv tool dir --bin)/agentloadout" setup --yes
 ```
 
@@ -26,15 +26,16 @@ installed program, and installs a short guide skill so agents know the safe work
 `setup` and `uninstall` need `--yes`; otherwise they stop with exit code 2. Use
 `setup --yes --to claude-code,codex` to pick harnesses.
 
-**2. GitHub token (optional, recommended).** A token without scopes raises the GitHub API limit from 60
-to 5,000 requests per hour. Your harness does not pass the agent's shell variables to MCP servers, so
-store it once:
+**2. GitHub token (optional, recommended).** A read-only token raises the GitHub API limit from 60 to
+5,000 requests per hour. The easiest way is the web **Settings** menu (see "Settings: GitHub token") or
+`agentloadout set-token` in your own terminal. If the token is already in the agent's shell:
 
 ```bash
 GITHUB_TOKEN=... "$(uv tool dir --bin)/agentloadout" setup --yes --token-from-env
 ```
 
-The token is written to `<data folder>/github_token` (mode 0600) and is never printed.
+The token is tested against GitHub, written to `<data folder>/github_token` (mode 0600) and never printed.
+Never paste a token into an agent chat.
 
 **3. Restart your harness** so it starts the MCP server: Claude Code, Codex, Gemini CLI and OpenCode —
 start a new session; Cursor — reload the window.
@@ -128,9 +129,72 @@ agentloadout plans         # plans waiting for approval
 agentloadout approve <id>  # approve (interactive terminal + PIN)
 agentloadout set-pin       # set or change the approval PIN       (--reset: forgot it)
 agentloadout set-password  # web password, needed for your phone   (--reset: forgot it, --off: remove)
+agentloadout set-token     # GitHub token, hidden input              (--test, --clear, --from-env)
 agentloadout harnesses     # detected harnesses and config paths
 agentloadout where         # data, config and backup folders
 ```
+
+## Settings: GitHub token
+
+The gear icon in the web UI opens **Pengaturan** (Settings): the GitHub token on top, then the security
+section (password, PIN, log out everywhere). For the token you can:
+
+- **Simpan & uji** (save and test): the token is checked with GitHub's `/rate_limit` (uses no quota).
+  A token GitHub rejects (401) is not saved. If GitHub cannot be reached, it is saved with a warning.
+- **Uji** (test) the token you typed, or the active one when the field is empty. At most 10 tests per
+  minute per instance.
+- **Hapus** (remove) the token that Agent Loadout manages. Tokens from environment variables or
+  `config.toml` are only shown, never changed.
+
+The menu shows which source is active, its kind (classic / fine-grained), its last 4 characters and the
+expiry date GitHub reports (shown raw when its format is unknown). It never shows or returns the token.
+From the laptop it always works; from a phone only in a logged-in session over HTTPS that is not a
+Tailscale Funnel request, so a token never travels over plain HTTP.
+
+Recommended token: a **fine-grained** token with *Repository access: Public repositories (read-only)*, no
+account permissions, expiring in 90 days. A classic token works too; it needs **no scopes**, and the menu
+warns when a classic token has some.
+
+The terminal does the same: `agentloadout set-token` (hidden input), `--test`, `--clear`, and
+`--from-env` (saves `$GITHUB_TOKEN`; meant for agents, so they never ask for a token in chat).
+
+Which token is used (first one present wins):
+
+| Order | Source | Set with |
+|---|---|---|
+| 1 | `GITHUB_TOKEN` environment variable | the process that runs Agent Loadout |
+| 2 | `GITHUB_TOKEN_FILE` environment variable (path to a file) | the process that runs Agent Loadout |
+| 3 | `<data folder>/github_token` | Settings menu, `set-token`, `setup --token-from-env` |
+| 4 | `[github] token_file` in `config.toml` | editing the config |
+
+The web UI, the MCP server and the daily routine are separate processes: a variable set in one of them
+does not reach the others. `agentloadout where` and the Settings menu show the source each one sees, and
+every catalog run records the source it really used (`last_run.token_source`). A new token is used from
+the next catalog refresh; nothing needs a restart.
+
+## Catalog fetch indicator and "Perbarui sekarang"
+
+While the catalog is being fetched the web UI shows a banner with the stage (backup, search, repo
+details, saving), the count (`400/630`), the start time and an estimate. The first fetch of an empty
+catalog says "Katalog pertama sedang diambil". When GitHub's rate limit makes it pause, the banner says
+until when ("Menunggu kuota GitHub sampai 15:02"). Whether a fetch is running comes from the refresh lock,
+so a stopped or killed fetch never keeps showing "running".
+
+After a fetch: a summary line ("Katalog diperbarui <time> · N item"); a red banner with the (sanitized)
+error when the last fetch failed; yellow notes when items are not checked yet, the API quota ran out, or
+no token is set, with a button to the token settings. Cards of repositories that could not be examined
+carry a **Belum diperiksa** label, and a filter shows only those.
+
+**Perbarui sekarang** (update now) starts a fetch from the web UI: only from the laptop or a logged-in
+session that is not a Tailscale Funnel request, not while one is running, and at most once every 15
+minutes (counted from the last start of any fetch). Without a token it warns first: 60 requests per hour,
+so more items may stay unchecked.
+
+Every way of fetching (MCP, web, `agentloadout refresh`, the daily routine) takes the same lock, so two
+never run at once; the one that comes second stops (the routine with exit code 0). Each fetch backs up the
+catalog first. The first backup of a day is kept as it is; later fetches that day get their own file
+(`katalog-<date>-<time>.db`, the newest 3 per day are kept), so a bad repeated run cannot overwrite the
+good copy from the morning.
 
 ## Open it from your phone (Akses dari HP)
 
@@ -245,7 +309,7 @@ Every config file is backed up before it changes; removing an item restores it.
 
 ```toml
 [github]
-# token_file = "/path/to/github_token"   # optional; default: env GITHUB_TOKEN, then <data folder>/github_token
+# token_file = "/path/to/github_token"   # optional; lowest priority (see "Settings: GitHub token")
 
 [web]
 host = "127.0.0.1"
