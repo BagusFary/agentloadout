@@ -98,6 +98,17 @@ def record_error(message: str):
     _write_state(last_error=err)
 
 
+def _clear_last_error():
+    try:
+        from . import db
+        con = db.connect()
+        db.set_meta(con, "last_error", None)
+        con.commit()
+        con.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def write_progress(**fields):
     from . import db
     con = db.connect()
@@ -169,11 +180,14 @@ def run_locked(fd: int | None = None, source: str | None = None, backup: bool = 
     os.environ["AGENTLOADOUT_REFRESH_SOURCE"] = source
     os.environ["AGENTLOADOUT_REFRESH_STARTED"] = started
     _write_pid(os.getpid())
-    _write_state(started_at=started, source=source, pid=os.getpid(), finished_at=None)
+    _write_state(started_at=started, source=source, pid=os.getpid(), finished_at=None, last_error=None)
+    _clear_last_error()  # an error of an earlier run must not look like this run's (e.g. after kill -9)
     old_term = signal.signal(signal.SIGTERM, _on_term) if os.name != "nt" else None
     try:
+        # always a fresh progress entry: a run killed before it writes anything shows as stopped, not as the old run
+        write_progress(step=0, label="Mencadangkan katalog" if backup else "Memulai pembaruan", started_at=started,
+                       source=source)
         if backup:
-            write_progress(step=0, label="Mencadangkan katalog", started_at=started, source=source)
             from . import backup as bk
             bk.main_args([])
         from . import collector

@@ -9,7 +9,9 @@ python3 scripts/collect.py >> data/collect.log 2>&1
 python3 scripts/translate.py --apply >> data/collect.log 2>&1 || echo "terjemahan gagal diterapkan (lanjut)" >> data/collect.log
 python3 scripts/translate.py --export data/to_translate.json >> data/collect.log 2>&1 || true
 python3 scripts/check_updates.py >> data/collect.log 2>&1 || echo "cek update gagal (lanjut)" >> data/collect.log
-grep "cadangan OK" data/collect.log | tail -1
-grep "selesai dalam" data/collect.log | tail -1
-grep "diekspor" data/collect.log | tail -1
-grep "update tersedia" data/collect.log | tail -1
+# summary lines; a missing line must not fail the routine (e.g. the collection was skipped because another
+# refresh held the lock: collect.py then prints "...dilewati" and exits 0)
+grep "cadangan OK" data/collect.log | tail -1 || true
+grep -E "selesai dalam|dilewati" data/collect.log | tail -1 || true
+grep "diekspor" data/collect.log | tail -1 || true
+grep "update tersedia" data/collect.log | tail -1 || true

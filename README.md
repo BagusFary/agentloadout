@@ -330,6 +330,9 @@ Every config file is backed up before it changes; removing an item restores it.
   (`set-pin --reset`, `set-password --reset`) are traces, not barriers: a program running as you could
   run them too, but the reset time stays visible in `where` and the web UI. Keep your harness' own
   command approval prompts turned on and never tell an agent your PIN or password.
+- **HTTPS for the token comes from the proxy's header.** From outside the laptop the token menu requires
+  `X-Forwarded-Proto: https` (set by `tailscale serve`). A client on the LAN could send that header itself
+  over plain HTTP; that only exposes the token it is sending itself, but use the menu over HTTPS only.
 - **The PIN hash can be guessed offline.** `approval_pin.json` is readable by your user, so a program
   running as you can copy it and try PINs without the 5-try limit. scrypt makes each try slow (measured: about
   0.19 s per try on one laptop core). Estimate: trying every 8-digit PIN takes about 220 core-days, so
