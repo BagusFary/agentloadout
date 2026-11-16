@@ -81,3 +81,19 @@ def test_open_dashboard_never_returns_a_foreign_instance(sb, tmp_path):
             if not (other.al / "ui.json").exists():
                 break
             time.sleep(0.1)
+
+
+def test_public_health_hides_the_version(sb):
+    """S17: outside the laptop /api/health only says ok + instance (open_dashboard needs no more)."""
+    sb.catalog()
+    web = sb.ui()
+    ext = web.request("GET", "/api/health", headers={"X-Forwarded-For": "1.2.3.4"})["json"]
+    assert set(ext) == {"ok", "instance"}
+    funnel = web.request("GET", "/api/health", headers={"X-Forwarded-For": "1.2.3.4", "Tailscale-Funnel-Request": "?1"})["json"]
+    assert set(funnel) == {"ok", "instance"}
+    assert "version" in web.request("GET", "/api/health")["json"]
+    sb.set_password("kata-sandi-uji-12")
+    _, cookie = web.login("kata-sandi-uji-12", headers={"X-Forwarded-For": "1.2.3.4"})
+    assert "version" in web.request("GET", "/api/health", headers={"X-Forwarded-For": "1.2.3.4"}, cookie=cookie)["json"]
+    from agentloadout.web import server
+    assert server.instance_at("127.0.0.1", web.port) == (sb.al / "instance_id").read_text().strip()

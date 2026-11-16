@@ -420,10 +420,13 @@ class Handler(BaseHTTPRequestHandler):
         LAST_REQUEST[0] = time.time()
         path = urlparse(self.path).path
         if path == "/api/health":
-            from .. import __version__, selfupdate
-            stale = selfupdate.stale_process_note()
-            return self.send_json(200, {"ok": True, "instance": INSTANCE[0] or paths.instance_id(), "version": __version__,
-                                        **({"stale": stale} if stale else {})})
+            out = {"ok": True, "instance": INSTANCE[0] or paths.instance_id()}
+            # the version only for this computer or a logged-in session: a public version helps pick old holes
+            if self.scope() == "local" or (auth.enabled() and self.authed()):
+                from .. import __version__, selfupdate
+                stale = selfupdate.stale_process_note()
+                out.update(version=__version__, **({"stale": stale} if stale else {}))
+            return self.send_json(200, out)
         if not self.gate(path):
             return
         if path == "/login":

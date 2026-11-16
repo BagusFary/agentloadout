@@ -136,12 +136,9 @@ def source_repo(info: dict | None = None) -> str:
 
 
 def check_repo() -> str:
-    """Repository for the read-only version *check* (banner). Installing always goes through source_repo()."""
-    info = install_kind()
-    override = os.environ.get("AGENTLOADOUT_UPGRADE_REPO", "")
-    if override and (norm_url(override) == norm_url(info.get("url", "")) or override.startswith("file://")):
-        return override
-    return REPO
+    """Repository for the read-only version check (banner): the same rule as installing (source_repo), so an
+    environment variable can never point the check, its SHAs or its change notes at another repository."""
+    return source_repo(install_kind())
 
 
 # --------------------------------------------------------------------------- remote tags
@@ -393,7 +390,7 @@ def stop_ondemand_ui() -> str:
 
 def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_insecure: bool = False,
             check_only: bool = False, out=print, ask=None) -> int:
-    from . import pin, plans, refresh
+    from . import refresh
     info = install_kind()
     if check_only:
         c = check(force=True, pre=pre)
@@ -423,9 +420,26 @@ def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_i
     if norm_url(info["url"]) != norm_url(repo):
         out(f"upgrade ditolak: tool ini dipasang dari {info['url']}, bukan dari repo resmi {REPO}.")
         return 2
-    if refresh.running():
+    from . import filelock
+    try:  # one upgrade at a time
+        up_fd = filelock.acquire(paths.home() / "upgrade.lock", blocking=False)
+    except BlockingIOError:
+        out("upgrade ditolak: upgrade lain sedang berjalan.")
+        return 2
+    ref_fd = refresh.try_lock()  # held until verified: no catalog refresh may start while the venv is rebuilt
+    if ref_fd is None:
+        filelock.release(up_fd)
         out("upgrade ditolak: pembaruan katalog sedang berjalan. Tunggu sampai selesai.")
         return 2
+    try:
+        return _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask)
+    finally:
+        filelock.release(ref_fd)
+        filelock.release(up_fd)
+
+
+def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
+    from . import pin, plans
     approved = [p["id"] for p in plans.list_plans("approved")]
     if approved:
         out(f"upgrade ditolak: ada rencana yang sudah disetujui tetapi belum dipasang ({', '.join(approved)}). "
@@ -461,8 +475,9 @@ def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_i
             "oleh pemilik repo, jalankan `agentloadout upgrade --check` lalu ulangi.")
         return 2
     downgrade = cur and vkey(tv) < vkey(cur)
-    if (to or downgrade) and not human:
-        out("upgrade ditolak: --to dan downgrade hanya boleh dijalankan pengguna di terminalnya sendiri (bukan agen).")
+    if (to or downgrade or pre) and not human:
+        out("upgrade ditolak: --to, --pre (pre-release) dan downgrade hanya boleh dijalankan pengguna di terminalnya "
+            "sendiri (bukan agen).")
         return 2
     if vkey(tv) < vkey(MIN_SAFE + (None,)):
         if not force_insecure:
@@ -506,6 +521,12 @@ def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_i
     why = detail if not ok else f"verifikasi gagal: --version={ver!r}, commit={commit and commit[:7]!r}, harusnya {tag_version(tag)}/{sha[:7]}"
     out(f"  ✗ {why}")
     entry.update(status="failed", error=why)
+    if old_sha and commit == old_sha and ver == __version__:
+        # uv failed before touching the install (e.g. the fetch failed): the old version is still complete
+        entry["rollback"] = "tidak perlu: instalasi lama masih utuh"
+        _history_add(entry)
+        out(f"  instalasi lama masih utuh: {ver} ({old_sha[:7]}). Tidak ada yang berubah.")
+        return 1
     if not old_sha:
         entry["rollback"] = "tidak bisa: SHA lama tidak diketahui"
         _history_add(entry)
@@ -514,7 +535,7 @@ def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_i
     out(f"  rollback ke {__version__} ({old_sha[:7]})…")
     rok, rdetail = _uv_install(repo, old_sha, python)
     rver, rcommit = _installed()
-    if rok and rcommit == old_sha and rver:
+    if rcommit == old_sha and rver == __version__:  # judged by what is installed, not by uv's exit code
         entry["rollback"] = "ok"
         _history_add(entry)
         out(f"  ✓ kembali ke {rver} ({old_sha[:7]}). Tidak ada yang berubah.")

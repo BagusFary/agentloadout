@@ -142,6 +142,14 @@ agentloadout upgrade --check   # is there a newer release? (no changes)
 agentloadout upgrade           # install the newest release tag
 ```
 
+**From v0.3.0:** v0.3.0 has no `upgrade` command yet, so move to v0.4.0 once by hand:
+
+```bash
+uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.4.0"
+```
+
+From v0.4.0 on, use `agentloadout upgrade`.
+
 `upgrade` works for installs made with `uv tool install git+…` (the way this README installs). It reads
 the release tags of the official repository with `git ls-remote` (no GitHub API quota), resolves the tag to
 a commit, installs **that commit**, and checks that `agentloadout --version` and the installed commit match.
@@ -160,7 +168,8 @@ restart the web UI; an on-demand web UI started by an agent is stopped automatic
 - **Who may run it:** you, or an agent when you ask it to, but agents only to the newest release.
   `--to vX.Y.Z` and every downgrade need you in your own terminal. Releases older than 0.3.0 are refused:
   they ignore the hashed web password and the outside-access gate, so the web UI could open without a password.
-- **Pre-releases** only with `--pre`. **No automatic upgrades.**
+- **Pre-releases** only with `--pre`, which (like `--to`) needs you in your own terminal.
+  **No automatic upgrades.**
 - A notice of a newer release shows in the web UI (with the changes and the command to copy; there is no
   upgrade button), in `agentloadout where` and in MCP responses. They read a cached check made at most once
   a day after a catalog refresh, or by `upgrade --check`.
@@ -325,7 +334,9 @@ Every config file is backed up before it changes; removing an item restores it.
 - **Limits.** Everything runs as your user, so an agent with unrestricted shell access can still bypass
   local controls on purpose: it can edit a plan file (the approval record is hashed, but the hash is not
   secret and can be recomputed), call the Python API, delete the PIN file and set a new PIN through a
-  pseudo-terminal with the agent variables removed, or edit harness configs directly. None of these is a
+  pseudo-terminal with the agent variables removed, run `agentloadout upgrade --to`/`--pre` or a downgrade
+  the same way (the "human at a terminal" check is a terminal plus no agent variables), or edit harness
+  configs directly. None of these is a
   documented one-step path, and each is a deliberate file change your harness shows you. The resets
   (`set-pin --reset`, `set-password --reset`) are traces, not barriers: a program running as you could
   run them too, but the reset time stays visible in `where` and the web UI. Keep your harness' own

@@ -114,8 +114,8 @@ def test_check_only_reads_and_caches(sb, repos):
     pre = tool.cli("upgrade", "--check", "--pre")
     assert "0.5.0rc1" in pre.stdout
     tool.cli("upgrade", "--check")  # back to releases only
-    # where reads the cache only: it still answers with the repo gone
-    w = tool.cli("where", extra={"AGENTLOADOUT_UPGRADE_REPO": "file:///nonexistent/repo.git"})
+    # where reads the cache only: it still answers with git unusable
+    w = tool.cli("where", extra={"GIT_EXEC_PATH": "/nonexistent", "PATH": "/usr/sbin"})
     assert "terbaru 0.4.1" in w.stdout and "agentloadout upgrade" in w.stdout and "uv-tool-git" in w.stdout
 
 
@@ -140,6 +140,10 @@ def test_agent_upgrades_to_latest_and_downgrade_rules(sb, repos):
     # downgrades and --to: a human at a terminal only
     r = tool.cli("upgrade", "--to", "v0.4.0", "--yes")
     assert r.returncode == 2 and "terminal" in r.stdout
+    r = tool.cli("upgrade", "--pre", "--yes", extra={"CLAUDECODE": "1"})  # S18: pre-releases are a human decision
+    assert r.returncode == 2 and "--pre" in r.stdout and tool.state()[0] == "0.4.1"
+    rc, out = tool.pty("upgrade", "--pre", answers=[("Lanjutkan", "n")])
+    assert rc == 1 and "0.5.0rc1" in out and "Dibatalkan" in out
     rc, out = tool.pty("upgrade", "--to", "v0.4.0", answers=[("Lanjutkan", "y")], extra={"CLAUDECODE": "1"})
     assert rc == 2 and "bukan agen" in out
     rc, out = tool.pty("upgrade", "--to", "v0.2.0")
@@ -242,7 +246,7 @@ def test_notice_in_web_where_and_mcp_reads_the_cache(sb):
     (sb.al / "update_check.json").write_text(json.dumps({
         "checked_at": "2026-11-16T00:00:00+00:00", "latest": "9.9.9", "tag": "v9.9.9", "sha": "b" * 40,
         "notes": "### Added\n- <script>alert(1)</script> hal baru", "error": None}))
-    env = {"AGENTLOADOUT_UPGRADE_REPO": "file:///nonexistent/repo.git"}  # any network check would fail loudly
+    env = {"GIT_EXEC_PATH": "/nonexistent"}  # web, where and MCP only read the cache
     web = sb.ui(extra_env=env)
     st = web.request("GET", "/api/status")["json"]
     assert st["update"]["latest"] == "9.9.9" and "git pull" in st["update"]["command"]
@@ -271,3 +275,80 @@ def test_old_process_warns_about_newer_files(sb, monkeypatch):
     (sb.al / "ui.json").write_text(json.dumps(ui))
     assert "masih versi 0.0.1" in sb.cli("where").stdout
     web.stop()
+
+
+# ------------------------------------------------------------------ review fixes (W2a, S15, S16)
+def test_check_ignores_a_foreign_repo_override(sb, repos):
+    """W2a: an override that is not the install's own source changes neither the check nor its cache."""
+    tool = Tool(sb, repos)
+    from agentloadout.selfupdate import REPO
+    # offline: git maps the official URL to the local "official" repo; HTTP (raw CHANGELOG) goes to a closed port
+    offline = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.{repos['good']}.insteadOf", "GIT_CONFIG_VALUE_0": REPO,
+               "HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"}
+    r = tool.cli("upgrade", "--check", extra={"AGENTLOADOUT_UPGRADE_REPO": repos["broken"], **offline})
+    assert r.returncode == 0 and "0.4.1" in r.stdout and "0.4.2" not in r.stdout and "rusak" not in r.stdout
+    cache = json.loads((sb.al / "update_check.json").read_text())
+    assert cache["tag"] == "v0.4.1" and cache["sha"] == repos["shas"]["v0.4.1"] and "rusak" not in (cache["notes"] or "")
+    r = tool.cli("upgrade", "--yes")  # a legitimate upgrade is not blocked as "tag moved"
+    assert r.returncode == 0 and tool.state() == ("0.4.1", repos["shas"]["v0.4.1"])
+
+
+def _uv_wrapper(tmp_path, mode):
+    """A `uv` in front of the real one: mode fail = `uv tool install` fails before touching anything (like a broken
+    network); mode slow = it waits 4 s, then runs the real install."""
+    real = shutil.which("uv")
+    d = tmp_path / f"uvwrap-{mode}"
+    d.mkdir()
+    body = {"fail": 'echo "error: Failed to fetch (simulated)" >&2; exit 2',
+            "slow": f'sleep 4; exec "{real}" "$@"'}[mode]
+    (d / "uv").write_text(f'#!/bin/bash\nif [ "$1 $2" = "tool install" ]; then {body}; fi\nexec "{real}" "$@"\n')
+    (d / "uv").chmod(0o755)
+    return d
+
+
+def test_failed_fetch_keeps_the_old_install_without_a_false_alarm(sb, repos, tmp_path):
+    """S15: uv fails before touching the install: no rollback, no "rollback juga gagal"."""
+    tool = Tool(sb, repos)
+    before = tool.state()
+    wrap = _uv_wrapper(tmp_path, "fail")
+    r = tool.cli("upgrade", "--yes", extra={"PATH": f"{wrap}:{tool.env['PATH']}"})
+    assert r.returncode == 1 and "masih utuh" in r.stdout and "rollback juga gagal" not in r.stdout, r.stdout
+    assert tool.state() == before
+    h = tool.history()[-1]
+    assert h["status"] == "failed" and h["rollback"].startswith("tidak perlu")
+
+
+def test_upgrade_holds_its_locks_until_verified(sb, repos, tmp_path):
+    """S16: during the install a second upgrade and a catalog refresh are refused."""
+    from agentloadout import filelock
+    sb.catalog()
+    tool = Tool(sb, repos)
+    wrap = _uv_wrapper(tmp_path, "slow")
+    env = {**tool.env, "PATH": f"{wrap}:{tool.env['PATH']}"}
+    p = subprocess.Popen([str(tool.bin), "upgrade", "--yes"], env=env, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        held = False
+        for _ in range(100):
+            try:
+                fd = filelock.acquire(sb.al / "refresh.lock", blocking=False)
+                filelock.release(fd)
+            except BlockingIOError:
+                held = True
+                break
+            import time
+            time.sleep(0.1)
+        assert held, "the upgrade did not take the refresh lock"
+        second = tool.cli("upgrade", "--yes")
+        assert second.returncode == 2 and "upgrade lain sedang berjalan" in second.stdout
+        ref = tool.cli("refresh")
+        assert ref.returncode == 1 and "refresh lain sedang berjalan" in ref.stderr
+        out, _ = p.communicate(timeout=600)
+        assert p.returncode == 0, out
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert tool.state() == ("0.4.1", repos["shas"]["v0.4.1"])
+    for name in ("refresh.lock", "upgrade.lock"):  # released afterwards
+        fd = filelock.acquire(sb.al / name, blocking=False)
+        filelock.release(fd)
