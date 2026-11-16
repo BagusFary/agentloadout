@@ -164,7 +164,9 @@ plan is approved but not applied yet. Your data folder, PIN, password and MCP re
 Do not stop an upgrade half-way. It prints a recovery command before it touches the install; Ctrl-C or a
 `kill` (SIGTERM) during the install makes it restore the previous version and exit with 130, but a hard kill
 (`kill -9`) cannot be caught: then run the printed `uv tool install --force "git+…@<old commit>"` yourself
-(`agentloadout where` and `upgrade --check` show it too). **Agents:** run `agentloadout upgrade` without a
+(`agentloadout where` and `upgrade --check` show it too). If `agentloadout` itself no longer starts, the
+recovery command is the `recover` field of the last entry in `<data folder>/upgrade_history.json`
+(`agentloadout where` shows the data folder; Linux default `~/.local/share/agentloadout`). **Agents:** run `agentloadout upgrade` without a
 short command timeout (or in the background) and never interrupt it; if it was cut off, run the recovery
 command it printed.
 
