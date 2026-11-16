@@ -4,7 +4,7 @@ All notable changes to Agent Loadout. Format: [Keep a Changelog](https://keepach
 versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the section of the new version
 (read from this file at the release commit), so every release needs an entry here (see RELEASING.md).
 
-## [0.5.0]
+## [0.5.0] - 2026-11-16
 
 ### Added
 - Interactive menu: `agentloadout` without arguments (or `agentloadout menu`) in a terminal shows the
