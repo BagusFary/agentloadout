@@ -26,6 +26,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from . import __version__, paths
@@ -299,13 +300,47 @@ def history_file() -> Path:
     return paths.home() / "upgrade_history.json"
 
 
-def _history_add(entry: dict):
+def read_history() -> list:
     try:
-        hist = json.loads(history_file().read_text())
+        h = json.loads(history_file().read_text())
+        return h if isinstance(h, list) else []
     except (OSError, ValueError):
-        hist = []
+        return []
+
+
+def _history_add(entry: dict):
+    """Append, or replace the entry with the same id (a `running` entry becomes its final state)."""
+    hist = [e for e in read_history() if not (entry.get("id") and e.get("id") == entry["id"])]
     hist.append(entry)
     paths.write_private(history_file(), json.dumps(hist[-50:], indent=1))
+
+
+def _upgrade_lock_free() -> bool:
+    from . import filelock
+    try:
+        fd = filelock.acquire(paths.home() / "upgrade.lock", blocking=False)
+    except BlockingIOError:
+        return False
+    filelock.release(fd)
+    return True
+
+
+def interrupted_note() -> str | None:
+    """A `running` entry with no upgrade holding the lock = an upgrade that was killed (e.g. SIGKILL) mid-way."""
+    stuck = [e for e in read_history() if e.get("status") == "running"]
+    if not stuck or not _upgrade_lock_free():
+        return None
+    e = stuck[-1]
+    return (f"Upgrade {e.get('from')} -> {e.get('to')} ({e.get('at')}) terputus sebelum selesai. Kalau `agentloadout` "
+            f"atau MCP tidak jalan, pulihkan dengan: {e.get('recover')}")
+
+
+def _settle_stuck(note: str):
+    """Mark leftover `running` entries as interrupted (called under the upgrade lock, or after --check showed them)."""
+    for e in read_history():
+        if e.get("status") == "running":
+            e.update(status="interrupted", rollback=note)
+            _history_add(e)
 
 
 def backup_state(frm: str, to: str) -> Path:
@@ -393,6 +428,11 @@ def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_i
     from . import refresh
     info = install_kind()
     if check_only:
+        stuck = interrupted_note()
+        if stuck:
+            out("PERINGATAN: " + stuck)
+            if info.get("commit") and _installed()[1] == info["commit"]:
+                _settle_stuck(f"tidak selesai; instalasi ternyata utuh ({__version__}), dicatat oleh upgrade --check")
         c = check(force=True, pre=pre)
         if c.get("error"):
             out(f"Cek versi gagal: {c['error']}")
@@ -431,11 +471,61 @@ def upgrade(to: str | None = None, pre: bool = False, yes: bool = False, force_i
         filelock.release(up_fd)
         out("upgrade ditolak: pembaruan katalog sedang berjalan. Tunggu sampai selesai.")
         return 2
+    in_main = threading.current_thread() is threading.main_thread() and os.name != "nt"
+    old_int = signal.getsignal(signal.SIGINT) if in_main else None
+    old_term = signal.signal(signal.SIGTERM, _on_term) if in_main else None  # a harness kill takes the same path as Ctrl-C
+    marked = _mark_upgrading()
     try:
+        _settle_stuck("terputus (proses mati tanpa sempat mencatat; misalnya SIGKILL)")
         return _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask)
     finally:
+        if in_main:
+            signal.signal(signal.SIGINT, old_int)
+            signal.signal(signal.SIGTERM, old_term)
+        _unmark_upgrading(marked)
         filelock.release(ref_fd)
         filelock.release(up_fd)
+
+
+def _on_term(signum, frame):
+    raise SystemExit(f"dihentikan oleh sinyal {signum}")
+
+
+def _ignore_signals():
+    if threading.current_thread() is threading.main_thread() and os.name != "nt":
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def _mark_upgrading():
+    """While the upgrade holds the refresh lock, the web UI says so instead of "Memulai pembaruan" (S19)."""
+    if not paths.db_path().exists():
+        return None
+    try:
+        from . import db
+        con = db.connect()
+        prev = db.get_meta(con, "progress") or {}
+        now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        db.set_meta(con, "progress", {"running": True, "step": 0, "steps": 4, "label": "Agent Loadout sedang di-upgrade",
+                                      "source": "upgrade", "started_at": now, "at": now})
+        con.commit()
+        con.close()
+        return prev
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _unmark_upgrading(prev):
+    if prev is None:
+        return
+    try:
+        from . import db
+        con = db.connect()
+        db.set_meta(con, "progress", prev)
+        con.commit()
+        con.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
@@ -509,8 +599,21 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
         out(f"upgrade dibatalkan: cadangan gagal ({e}). Tidak ada yang diubah.")
         return 1
 
-    ok, detail = _uv_install(repo, sha, python)
-    ver, commit = _installed()
+    recover = f'uv tool install --force "git+{repo}@{old_sha or "v" + __version__}"'
+    entry.update(id=f"{entry['at']}-{os.getpid()}", status="running", repo=repo, recover=recover)
+    try:
+        _history_add(entry)  # written before uv touches anything: even SIGKILL leaves a trace and the recovery command
+        out(f"  Kalau terputus, pulihkan dengan: {recover}")
+        sys.stdout.flush()
+        ok, detail = _uv_install(repo, sha, python)
+        ver, commit = _installed()
+    except (KeyboardInterrupt, SystemExit) as e:
+        _ignore_signals()  # the restore below must not be interrupted as well
+        why = "dihentikan (Ctrl-C)" if isinstance(e, KeyboardInterrupt) else (str(e) or "dihentikan")
+        out(f"\n  ✗ upgrade terputus: {why}. Memulihkan versi lama, jangan hentikan lagi…")
+        entry.update(status="interrupted", error=why)
+        _restore_old(repo, old_sha, python, entry, out)
+        return 130
     if ok and ver == tag_version(tag) and commit == sha:
         entry["status"] = "ok"
         _history_add(entry)
@@ -521,28 +624,36 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
     why = detail if not ok else f"verifikasi gagal: --version={ver!r}, commit={commit and commit[:7]!r}, harusnya {tag_version(tag)}/{sha[:7]}"
     out(f"  ✗ {why}")
     entry.update(status="failed", error=why)
+    _ignore_signals()  # a rollback must not be interrupted either
+    _restore_old(repo, old_sha, python, entry, out)
+    return 1
+
+
+def _restore_old(repo, old_sha, python, entry, out) -> bool:
+    """Bring back the version that was installed before. Judged by what is installed (version + commit), never by
+    uv's exit code; when the old install is still complete nothing is reinstalled (S15)."""
+    ver, commit = _installed()
     if old_sha and commit == old_sha and ver == __version__:
-        # uv failed before touching the install (e.g. the fetch failed): the old version is still complete
         entry["rollback"] = "tidak perlu: instalasi lama masih utuh"
         _history_add(entry)
         out(f"  instalasi lama masih utuh: {ver} ({old_sha[:7]}). Tidak ada yang berubah.")
-        return 1
+        return True
     if not old_sha:
         entry["rollback"] = "tidak bisa: SHA lama tidak diketahui"
         _history_add(entry)
-        out(f"Rollback tidak bisa (SHA lama tidak diketahui). Pasang ulang manual: uv tool install --force \"git+{repo}@v{__version__}\"")
-        return 1
+        out(f"Rollback tidak bisa (SHA lama tidak diketahui). Pasang ulang manual: {entry.get('recover')}")
+        return False
     out(f"  rollback ke {__version__} ({old_sha[:7]})…")
     rok, rdetail = _uv_install(repo, old_sha, python)
     rver, rcommit = _installed()
-    if rcommit == old_sha and rver == __version__:  # judged by what is installed, not by uv's exit code
+    if rcommit == old_sha and rver == __version__:
         entry["rollback"] = "ok"
         _history_add(entry)
         out(f"  ✓ kembali ke {rver} ({old_sha[:7]}). Tidak ada yang berubah.")
-        return 1
+        return True
     entry["rollback"] = f"gagal: {rdetail}"
     _history_add(entry)
     out("  ✗ rollback juga gagal. Pasang ulang manual:\n"
-        f"    uv tool install --force \"git+{repo}@{old_sha}\"\n"
+        f"    {entry.get('recover')}\n"
         f"  Data dan cadangan tetap aman di {paths.home()} ({entry.get('backup')}).")
-    return 1
+    return False

@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 
-from . import db, paths  # noqa: E402
+from . import paths  # noqa: E402
 from .backup import default_dir  # noqa: E402
 
 SERVICE = "katalog-agen"

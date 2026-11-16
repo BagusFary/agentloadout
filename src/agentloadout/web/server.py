@@ -120,7 +120,7 @@ def status_payload(con) -> dict:
     err = db.get_meta(con, "last_error") or None  # a successful run clears it (collector.run)
     started = p.get("started_at") if p["running"] else None
     eta = None
-    if p["running"] and started and _parse(started):
+    if p["running"] and started and _parse(started) and p.get("source") != "upgrade":
         elapsed = (_dt.datetime.now(_dt.timezone.utc) - _parse(started)).total_seconds()
         if p.get("step") == 3 and p.get("total") and (p.get("done") or 0) / p["total"] >= 0.1:
             eta = elapsed * (p["total"] - p["done"]) / max(p["done"], 1)

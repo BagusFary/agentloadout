@@ -4,6 +4,7 @@ repo (git+file://) built from this working copy with test tags. GitHub is never 
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -300,7 +301,12 @@ def _uv_wrapper(tmp_path, mode):
     d = tmp_path / f"uvwrap-{mode}"
     d.mkdir()
     body = {"fail": 'echo "error: Failed to fetch (simulated)" >&2; exit 2',
-            "slow": f'sleep 4; exec "{real}" "$@"'}[mode]
+            "slow": f'sleep 4; exec "{real}" "$@"',
+            # like uv cut off while installing (H18): the package is gone, then it hangs until a signal arrives;
+            # the rollback (its ref is $AL_KEEP) goes to the real uv
+            "break": (f'case "$*" in *"$AL_KEEP"*) exec "{real}" "$@";; esac; '
+                      'rm -rf "$UV_TOOL_DIR"/agentloadout/lib/python*/site-packages/agentloadout; '
+                      'touch "$AL_MARK"; sleep 120; exit 1')}[mode]
     (d / "uv").write_text(f'#!/bin/bash\nif [ "$1 $2" = "tool install" ]; then {body}; fi\nexec "{real}" "$@"\n')
     (d / "uv").chmod(0o755)
     return d
@@ -327,6 +333,7 @@ def test_upgrade_holds_its_locks_until_verified(sb, repos, tmp_path):
     env = {**tool.env, "PATH": f"{wrap}:{tool.env['PATH']}"}
     p = subprocess.Popen([str(tool.bin), "upgrade", "--yes"], env=env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    web = sb.ui()
     try:
         held = False
         for _ in range(100):
@@ -339,6 +346,8 @@ def test_upgrade_holds_its_locks_until_verified(sb, repos, tmp_path):
             import time
             time.sleep(0.1)
         assert held, "the upgrade did not take the refresh lock"
+        st = web.request("GET", "/api/status")["json"]  # S19: the web says it is an upgrade, not a catalog refresh
+        assert st["running"] and st["progress"]["label"] == "Agent Loadout sedang di-upgrade" and st["eta_seconds"] is None
         second = tool.cli("upgrade", "--yes")
         assert second.returncode == 2 and "upgrade lain sedang berjalan" in second.stdout
         ref = tool.cli("refresh")
@@ -352,3 +361,75 @@ def test_upgrade_holds_its_locks_until_verified(sb, repos, tmp_path):
     for name in ("refresh.lock", "upgrade.lock"):  # released afterwards
         fd = filelock.acquire(sb.al / name, blocking=False)
         filelock.release(fd)
+    st = web.request("GET", "/api/status")["json"]  # the catalog's own progress is back
+    assert not st["running"] and st["progress"].get("source") != "upgrade" and not st["progress"].get("stale")
+
+
+# ------------------------------------------------------------------ W3: an upgrade cut off half-way
+def _start_breaking_upgrade(sb, tool, tmp_path):
+    before = tool.state()
+    wrap = _uv_wrapper(tmp_path, "break")
+    mark = tmp_path / "broken.mark"
+    env = {**tool.env, "PATH": f"{wrap}:{tool.env['PATH']}", "AL_KEEP": before[1], "AL_MARK": str(mark)}
+    p = subprocess.Popen([str(tool.bin), "upgrade", "--yes"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, start_new_session=True)  # own process group, like a terminal job
+    import time
+    for _ in range(1200):
+        if mark.exists():
+            break
+        time.sleep(0.1)
+    assert mark.exists(), "the wrapper never ran"
+    assert tool.cli("--version").returncode != 0  # the install is broken now (H18)
+    return p, before
+
+
+def _locks_free(sb):
+    from agentloadout import filelock
+    for name in ("refresh.lock", "upgrade.lock"):
+        filelock.release(filelock.acquire(sb.al / name, blocking=False))
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM], ids=["ctrl-c", "sigterm"])
+def test_interrupted_upgrade_restores_the_old_version(sb, repos, tmp_path, sig):
+    sb.catalog()
+    tool = Tool(sb, repos)
+    p, before = _start_breaking_upgrade(sb, tool, tmp_path)
+    try:
+        os.killpg(p.pid, sig)  # Ctrl-C in a terminal / a harness stopping the command
+        out, _ = p.communicate(timeout=600)
+    finally:
+        if p.poll() is None:
+            os.killpg(p.pid, signal.SIGKILL)
+    assert p.returncode == 130, out
+    assert "Kalau terputus, pulihkan dengan" in out and "upgrade terputus" in out and "kembali ke 0.4.0" in out, out
+    assert "Traceback" not in out
+    assert tool.state() == before  # old version and commit back
+    h = tool.history()[-1]
+    assert h["status"] == "interrupted" and h["rollback"] == "ok" and h["from_sha"] == before[1]
+    assert len([e for e in tool.history() if e.get("id") == h["id"]]) == 1  # the running entry was replaced
+    _locks_free(sb)
+    st = sb.py("import json\nfrom agentloadout import db\nprint(json.dumps(db.get_meta(db.connect(), 'progress')))")
+    assert "sedang di-upgrade" not in st.stdout
+
+
+def test_sigkill_leaves_a_trace_and_the_recovery_command(sb, repos, tmp_path):
+    import shlex
+    tool = Tool(sb, repos)
+    p, before = _start_breaking_upgrade(sb, tool, tmp_path)
+    os.killpg(p.pid, signal.SIGKILL)  # cannot be caught
+    out, _ = p.communicate(timeout=60)
+    line = next(x for x in out.splitlines() if "Kalau terputus, pulihkan dengan:" in x)
+    recover = line.split("pulihkan dengan:", 1)[1].strip()
+    assert before[1] in recover and recover.startswith("uv tool install --force")
+    h = tool.history()[-1]
+    assert h["status"] == "running" and h["recover"] == recover
+    # the printed command really repairs it
+    run(shlex.split(recover), env=tool.env)
+    assert tool.state() == before
+    w = tool.cli("where").stdout
+    assert "terputus sebelum selesai" in w and recover in w
+    c = tool.cli("upgrade", "--check")
+    assert c.returncode == 0 and "PERINGATAN" in c.stdout and recover in c.stdout
+    assert "terputus sebelum selesai" not in tool.cli("where").stdout  # settled: the install is healthy
+    assert tool.history()[-1]["status"] == "interrupted"
+    _locks_free(sb)

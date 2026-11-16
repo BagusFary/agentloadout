@@ -491,7 +491,9 @@ function showStatus(j) {
   btn.disabled = running || j.cooldown_left > 0;
   btn.title = running ? "Pembaruan sedang berjalan" : j.cooldown_left > 0 ? `Bisa lagi dalam ${Math.ceil(j.cooldown_left / 60)} menit` : "Ambil data terbaru dari GitHub sekarang";
   // a finished run: only a real new last_run is "updated"; a failure says so instead
-  if (wasRunning && !running) {
+  if (wasRunning && !running && prev && prev.progress && prev.progress.source === "upgrade") {
+    toast("Upgrade Agent Loadout selesai; mulai ulang web UI dan sesi agen untuk memakai versi baru");
+  } else if (wasRunning && !running) {
     if (j.last_error) toast("Pembaruan katalog gagal, lihat pesan merah");
     else if (j.last_run && (!prev || !prev.last_run || prev.last_run.at !== j.last_run.at)) { toast("Data katalog sudah diperbarui"); load(true); }
     else toast("Pembaruan katalog berhenti");

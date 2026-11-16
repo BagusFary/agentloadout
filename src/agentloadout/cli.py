@@ -635,6 +635,9 @@ def main(argv=None):
         if ui and ui.get("version") and ui["version"] != __version__:
             print(f"          ! web UI ini masih versi {ui['version']} (terpasang {__version__}): mulai ulang web UI")
         from . import selfupdate
+        stuck = selfupdate.interrupted_note()
+        if stuck:
+            print("! " + stuck)
         c = selfupdate.read_cache()
         kind = selfupdate.install_kind()["kind"]
         line = f"version : {__version__} ({kind})"
