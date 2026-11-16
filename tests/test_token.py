@@ -4,12 +4,14 @@ import stat
 
 import pytest
 
+from conftest import fake_token
 
-GOOD = "ghp_DUMMYGOOD0123456789abcdefghijkWXYZ"           # accepted by the GitHub mock
-GOOD_PAT = "github_pat_DUMMYGOOD_0123456789abcdefPATQ"    # fine-grained, reports an expiry
-BAD = "ghp_DUMMYBAD00123456789abcdefghijklBADX"            # 401 from the mock
-CFG = "ghp_DUMMYGOODCONFIG0123456789abcdefCFGA"           # CEO-style token_file in config.toml
-ENVT = "ghp_DUMMYGOODENV0123456789abcdefghiENVB"
+
+GOOD = fake_token("DUMMYGOOD0123456789abcdefghijkWXYZ")           # accepted by the GitHub mock
+GOOD_PAT = fake_token("DUMMYGOOD_0123456789abcdefPATQ", "fine-grained")    # fine-grained, reports an expiry
+BAD = fake_token("DUMMYBAD00123456789abcdefghijklBADX")            # 401 from the mock
+CFG = fake_token("DUMMYGOODCONFIG0123456789abcdefCFGA")           # CEO-style token_file in config.toml
+ENVT = fake_token("DUMMYGOODENV0123456789abcdefghiENVB")
 ALL_TOKENS = (GOOD, GOOD_PAT, BAD, CFG, ENVT)
 
 
@@ -137,7 +139,7 @@ def test_web_save_test_clear(sb, web):
     assert active["status"] == 200 and active["json"]["test"]["core"]["limit"] == 5000
     st = web.request("GET", "/api/settings/token")["json"]
     assert st["last_check"]["expires"].startswith("2027-02-14")
-    scoped = web.request("POST", "/api/settings/token/test", body={"token": "ghp_DUMMYGOODSCOPE0123456789abcdefSCOP"})
+    scoped = web.request("POST", "/api/settings/token/test", body={"token": fake_token("DUMMYGOODSCOPE0123456789abcdefSCOP")})
     assert "scope" in scoped["json"]["test"]["warning"]
     clr = web.request("POST", "/api/settings/token/clear", body={})
     assert clr["status"] == 200 and not (sb.al / "github_token").exists()

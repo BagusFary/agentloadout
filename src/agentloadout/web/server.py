@@ -592,6 +592,32 @@ def read_ui() -> dict | None:
         return None
 
 
+def own_ui() -> dict | None:
+    """ui.json of this data folder, if that UI is alive and really is this instance."""
+    ui = read_ui()
+    if ui and instance_at(ui.get("host", "127.0.0.1"), ui.get("port")) == paths.instance_id():
+        return ui
+    return None
+
+
+def ensure_ui(wait: float = 10.0) -> dict | None:
+    """This instance's web UI (started on-demand in the background, detached from the caller, when needed).
+    Shared by the MCP tool open_dashboard and the interactive menu. Never returns another instance."""
+    import subprocess
+    ui = own_ui()
+    if ui:
+        return ui
+    subprocess.Popen([sys.executable, "-m", "agentloadout.cli", "ui", "--on-demand"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                     start_new_session=True, env=os.environ.copy())
+    for _ in range(int(wait / 0.2)):
+        time.sleep(0.2)
+        ui = own_ui()
+        if ui:
+            return ui
+    return None
+
+
 def bind(host, port, explicit) -> tuple[Server | None, int, str]:
     """Bind host:port; when it is busy and the port was not chosen explicitly, try the next ones.
     Returns (server, port, note). server is None when this instance already runs there."""

@@ -85,6 +85,9 @@ def _ask(prompt: str, yes: bool) -> bool:
         return input(f"{prompt} [y/N] ").strip().lower() in ("y", "ya", "yes")
     except EOFError:
         return False
+    except KeyboardInterrupt:  # Ctrl-C at a question = no, without a traceback (S21)
+        print()
+        return False
 
 
 def _need_yes(a, what: str) -> int:
@@ -345,6 +348,9 @@ def cmd_approve(a, approve=True):
         return 2
     try:
         gen = pin.verify(getpass.getpass("\nPIN persetujuan (Enter kosong = batal): "))
+    except KeyboardInterrupt:  # S21
+        print("\nDibatalkan.", file=sys.stderr)
+        return 130
     except pin.PinError as e:
         print(f"{e} Ditolak.", file=sys.stderr)
         return 2
@@ -506,10 +512,10 @@ def cmd_set_password(a):
     return 0
 
 
-def main(argv=None):
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="agentloadout", description="Agent Loadout: MCP servers, skills and apps for any agent harness.")
     ap.add_argument("--version", action="version", version=f"agentloadout {__version__}")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=False)  # no command: the interactive menu (terminal only)
     p = sub.add_parser("setup", help="register the MCP server in your harnesses")
     p.add_argument("--to", help="comma-separated harness ids (default: all detected)")
     p.add_argument("--yes", "-y", action="store_true", help="no questions (needed when run by an agent)")
@@ -550,40 +556,57 @@ def main(argv=None):
     p.add_argument("--force-insecure", action="store_true", help=argparse.SUPPRESS)
     p = sub.add_parser("update", help="did you mean `upgrade`? (catalog items: check-updates)")
     p.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    sub.add_parser("menu", help="interactive menu (only in a terminal; the same as running agentloadout without arguments)")
     p = sub.add_parser("set-token", help="save, test or remove the GitHub token (raises the API limit)")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--from-env", action="store_true", help="save $GITHUB_TOKEN (for agents; never paste a token in chat)")
     g.add_argument("--clear", action="store_true", help="remove the token Agent Loadout manages")
     g.add_argument("--test", action="store_true", help="test the active token against GitHub /rate_limit")
-    a = ap.parse_args(argv)
+    return ap
 
+
+def _dispatch(a, ap) -> int:
+    if a.cmd is None or a.cmd == "menu":
+        from . import menu
+        why = menu.not_interactive_reason()
+        if why is None:
+            return menu.run_menu()
+        if a.cmd is None:  # unchanged for scripts and agents: usage + exit 2
+            ap.print_usage(sys.stderr)
+            print("agentloadout: error: the following arguments are required: cmd", file=sys.stderr)
+            return 2
+        print(f"agentloadout menu: menu interaktif tidak tersedia di sini ({why}). Pakai subcommand, "
+              "misalnya `agentloadout where`.", file=sys.stderr)
+        return 2
     if a.cmd == "setup":
-        sys.exit(cmd_setup(a))
+        return cmd_setup(a)
     if a.cmd == "uninstall":
-        sys.exit(cmd_uninstall(a))
+        return cmd_uninstall(a)
     if a.cmd == "set-pin":
-        sys.exit(cmd_set_pin(a))
+        return cmd_set_pin(a)
     if a.cmd == "upgrade":
         from . import selfupdate
-        sys.exit(selfupdate.upgrade(to=a.to, pre=a.pre, yes=a.yes, force_insecure=a.force_insecure, check_only=a.check))
+        return selfupdate.upgrade(to=a.to, pre=a.pre, yes=a.yes, force_insecure=a.force_insecure, check_only=a.check)
     if a.cmd == "update":
         print("Maksud Anda `agentloadout upgrade`? (memperbarui Agent Loadout sendiri)\n"
               "Untuk versi baru MCP/skill yang terpasang: `agentloadout check-updates`.", file=sys.stderr)
-        sys.exit(2)
+        return 2
     if a.cmd == "set-token":
-        sys.exit(cmd_set_token(a))
+        return cmd_set_token(a)
     if a.cmd == "set-password":
-        sys.exit(cmd_set_password(a))
+        return cmd_set_password(a)
     if a.cmd == "ui":
         from .web import server
         server.main(a.host, a.port, on_demand=a.on_demand)
+        return 0
     elif a.cmd == "plans":
         cmd_plans(a)
     elif a.cmd in ("approve", "reject"):
         try:
-            sys.exit(cmd_approve(a, a.cmd == "approve"))
+            return cmd_approve(a, a.cmd == "approve")
         except (ValueError, PermissionError) as e:
-            sys.exit(f"Gagal: {e}")
+            print(f"Gagal: {e}", file=sys.stderr)
+            return 1
     elif a.cmd == "harnesses":
         from . import harness
         for h in harness.ADAPTERS.values():
@@ -591,7 +614,7 @@ def main(argv=None):
             print(f"{'✓' if i['detected'] else '·'} {i['name']:12} config: {i['config']}")
     elif a.cmd == "refresh":
         from . import refresh
-        sys.exit(refresh.run_locked())  # same lock as the MCP background refresh
+        return refresh.run_locked()  # same lock as the MCP background refresh
     elif a.cmd == "mcp":
         from . import mcp_server
         mcp_server.main()
@@ -600,8 +623,7 @@ def main(argv=None):
         backup.main_args([])
     elif a.cmd == "restore":
         from . import restore
-        sys.argv = ["restore"] + ([a.file] if a.file else ["--list"])
-        restore.main()
+        return restore.main([a.file] if a.file else ["--list"]) or 0
     elif a.cmd == "check-updates":
         from . import updates
         updates.main()
@@ -646,6 +668,31 @@ def main(argv=None):
         elif c and c.get("error"):
             line += f"; cek versi terakhir gagal ({c['error'][:60]})"
         print(line)
+    return 0
+
+
+def run(a, ap=None) -> int:
+    """Run one command and return its exit code (no sys.exit), so the menu can call commands repeatedly.
+    Ctrl-C ends any command except `mcp` with "Dibatalkan." and 130; `upgrade` handles its own signals."""
+    ap = ap or build_parser()
+    if a.cmd == "mcp":
+        return _dispatch(a, ap)
+    try:
+        code = _dispatch(a, ap)
+    except KeyboardInterrupt:
+        print("\nDibatalkan.", file=sys.stderr)
+        return 130
+    except SystemExit as e:  # a module that still exits on its own
+        if isinstance(e.code, str):
+            print(e.code, file=sys.stderr)
+            return 1
+        return e.code or 0
+    return code if isinstance(code, int) else 0
+
+
+def main(argv=None):
+    ap = build_parser()
+    sys.exit(run(ap.parse_args(argv), ap))
 
 
 if __name__ == "__main__":

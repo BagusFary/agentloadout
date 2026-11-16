@@ -32,12 +32,12 @@ def systemctl(*args):
     return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("backup", nargs="?")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--target", default=str(paths.db_path()))
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     if a.list or not a.backup:
         root = default_dir()
@@ -53,7 +53,8 @@ def main():
 
     ok, counts = check(a.backup)
     if ok != "ok":
-        sys.exit(f"cadangan rusak ({ok}), dibatalkan")
+        print(f"cadangan rusak ({ok}), dibatalkan", file=sys.stderr)
+        return 1
     live = os.path.abspath(a.target) == str(paths.db_path())
     if live:
         systemctl("stop", SERVICE)
@@ -77,5 +78,5 @@ def main():
     print(f"dipulihkan ke {a.target}: integrity {ok2}, {counts2}")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # also scripts/restore.py (runpy): keep the exit code (1 for a broken backup)
+    sys.exit(main())

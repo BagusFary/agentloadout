@@ -12,16 +12,20 @@ from pathlib import Path
 APP = "agentloadout"
 
 
-def home() -> Path:
+def home_dir() -> Path:
+    """The data folder's path, without creating it (for read-only callers such as the menu's status line)."""
     env = os.environ.get("AGENTLOADOUT_HOME")
     if env:
-        p = Path(env).expanduser()
-    elif sys.platform == "darwin":
-        p = Path.home() / "Library" / "Application Support" / APP
-    elif os.name == "nt":
-        p = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP
-    else:
-        p = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP
+        return Path(env).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP
+    if os.name == "nt":
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP
+
+
+def home() -> Path:
+    p = home_dir()
     p.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
         try:
