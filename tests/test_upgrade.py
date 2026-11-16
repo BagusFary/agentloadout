@@ -36,7 +36,7 @@ def set_version(src: Path, v: str, note: str):
 
 def commit_tag(src: Path, msg: str, tag: str):
     run(GIT + ["add", "-A"], cwd=src)
-    run(GIT + ["commit", "-q", "-m", msg], cwd=src)
+    run(GIT + ["commit", "-q", "--allow-empty", "-m", msg], cwd=src)  # the working copy may equal HEAD
     run(GIT + ["tag", tag], cwd=src)
     return run(["git", "rev-parse", "HEAD"], cwd=src).stdout.strip()
 
