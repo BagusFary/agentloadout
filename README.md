@@ -17,7 +17,7 @@ Paste this to your agent (Claude Code, Codex, Cursor, Gemini CLI, OpenCode):
 **1. Install and register** (the agent can run this; nothing here needs a person):
 
 ```bash
-uv tool install "git+https://github.com/BagusFary/agentloadout@v0.4.0"
+uv tool install "git+https://github.com/BagusFary/agentloadout@v0.6.0"
 "$(uv tool dir --bin)/agentloadout" setup --yes
 ```
 
@@ -246,12 +246,12 @@ server, `agentloadout ui`) can leave a half-removed install (`ModuleNotFoundErro
 The attempt is recorded with `status: manual` in `%APPDATA%\agentloadout\upgrade_history.json`, together
 with the command to go back (`recover`). If `agentloadout` no longer starts, close everything as in step 1
 and run that `recover` command, or reinstall a release:
-`uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.5.1"`. Your data in
+`uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.6.0"`. Your data in
 `%APPDATA%\agentloadout` is never touched by a reinstall. Windows is not tested automatically yet.
 
-**Coming from v0.5.0 on Windows:** do not run `agentloadout upgrade` to reach v0.5.1, because the
+**Coming from v0.5.0 on Windows:** do not run `agentloadout upgrade` to reach v0.6.0, because the
 `upgrade` of v0.5.0 still has the broken code. Close all agents and `agentloadout ui`, then run
-`uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.5.1"` yourself.
+`uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.6.0"` yourself.
 
 On Linux and macOS, `upgrade` names other processes that still use the installed program (an agent's MCP
 server, a web UI) as a warning and goes on: they keep running the old version until you start a new

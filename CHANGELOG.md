@@ -6,6 +6,11 @@ versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-17
+
+Includes the Windows upgrade fixes prepared as 0.5.1 (never tagged on their own) and the
+"Salin untuk agen" copy button.
+
 ### Added
 - Web UI: a round copy button on every catalog card and a "Tanya agen tentang repo ini" section with a
   preview in the item details copy a ready-made question for your own agent, asking it to explain the
@@ -18,14 +23,14 @@ versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the 
 
 ### Changed
 - The install-prompt button in the item details is renamed "Salin perintah pasang".
+- `upgrade` names other processes that still use the installed program (an agent's MCP server, a web UI):
+  a warning on Linux/macOS (they keep the old version until restarted), part of the manual steps on Windows.
+  The instance's own on-demand web UI is stopped only after the upgrade is confirmed, also when it was
+  started by v0.5.0. Windows is marked experimental; from v0.5.0 on Windows, reach v0.6.0 by hand.
 
 ### Fixed
 - Copy buttons no longer report "Tersalin" when copying actually failed.
 - Toast messages are announced to screen readers (`role="status"`).
-
-## [0.5.1]
-
-### Fixed
 - Windows: `agentloadout upgrade` could leave a broken install (`ModuleNotFoundError: No module named
   'agentloadout'`). On Windows it now prints safe manual steps (close agents, `uv tool install --force` by
   commit, check the version) instead of reinstalling itself; recorded as `manual` in the upgrade history.
@@ -34,12 +39,6 @@ versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the 
 - `uv tool install --python` gets the base interpreter, never one inside the tool's own folder.
 - Output that a Windows code page cannot show no longer stops a rollback; child output is read as UTF-8.
 - Stopping the on-demand web UI after an upgrade no longer needs `/proc`.
-
-### Changed
-- `upgrade` names other processes that still use the installed program (an agent's MCP server, a web UI):
-  a warning on Linux/macOS (they keep the old version until restarted), part of the manual steps on Windows.
-  The instance's own on-demand web UI is stopped only after the upgrade is confirmed, also when it was
-  started by v0.5.0. Windows is marked experimental; from v0.5.0 on Windows, reach v0.5.1 by hand.
 
 ## [0.5.0] - 2026-11-16
 

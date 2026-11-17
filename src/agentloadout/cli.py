@@ -13,7 +13,7 @@
   agentloadout mcp                                 MCP server over stdio (harnesses run this)
 
 Install from GitHub (there is no PyPI release; the PyPI package named `agentloadout` is not ours):
-  uv tool install "git+https://github.com/BagusFary/agentloadout@v0.4.0"
+  uv tool install "git+https://github.com/BagusFary/agentloadout@v0.6.0"
   "$(uv tool dir --bin)/agentloadout" setup --yes
 """
 from __future__ import annotations
