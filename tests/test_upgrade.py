@@ -561,8 +561,14 @@ def test_agent_upgrade_works_while_its_own_mcp_runs(sb, repos):
     harness = subprocess.Popen(["/bin/sh", "-c", f'exec "{tool.bin}" mcp'], env=tool.env, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
-        import time
-        time.sleep(1)
+        # wait for the MCP handshake (all imports done), like a harness session that is already running (Q1)
+        import select
+        harness.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",'
+                            b'"capabilities":{},"clientInfo":{"name":"t","version":"1"}}}\n')
+        harness.stdin.flush()
+        ready, _, _ = select.select([harness.stdout], [], [], 60)
+        assert ready, "MCP did not answer initialize within 60 s"
+        assert "result" in json.loads(harness.stdout.readline())
         r = tool.cli("upgrade", "--yes", extra={"CLAUDECODE": "1"})
         assert r.returncode == 0, r.stdout
         assert "PERINGATAN: proses ini masih memakai versi lama" in r.stdout and f"pid {harness.pid}" in r.stdout
