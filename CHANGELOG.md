@@ -17,8 +17,10 @@ versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the 
 - Stopping the on-demand web UI after an upgrade no longer needs `/proc`.
 
 ### Changed
-- `upgrade` refuses while another process (an agent's MCP server, a web UI) still uses the installed program
-  and names it; the instance's own on-demand web UI is stopped first. Windows is marked experimental.
+- `upgrade` names other processes that still use the installed program (an agent's MCP server, a web UI):
+  a warning on Linux/macOS (they keep the old version until restarted), part of the manual steps on Windows.
+  The instance's own on-demand web UI is stopped only after the upgrade is confirmed, also when it was
+  started by v0.5.0. Windows is marked experimental; from v0.5.0 on Windows, reach v0.5.1 by hand.
 
 ## [0.5.0] - 2026-11-16
 

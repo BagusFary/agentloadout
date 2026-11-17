@@ -465,7 +465,14 @@ def stop_ondemand_ui(wait: float = 5.0) -> str:
     if web.instance_at(ui.get("host", "127.0.0.1"), ui.get("port")) != paths.instance_id():
         return "web UI tidak berjalan"
     pid = ui.get("pid")
-    if not ui.get("on_demand") or not isinstance(pid, int):
+    on_demand = ui.get("on_demand")
+    if on_demand is None and isinstance(pid, int):  # ui.json of v0.5.0 and older: ask /proc where it exists
+        try:
+            args = open(f"/proc/{pid}/cmdline", "rb").read().decode(errors="replace").split("\0")
+            on_demand = "ui" in args and "--on-demand" in args
+        except OSError:
+            on_demand = False
+    if not on_demand or not isinstance(pid, int):
         return f"web UI di port {ui.get('port')} masih versi lama: mulai ulang (misalnya `systemctl --user restart ...` atau `agentloadout ui`)"
     try:
         os.kill(pid, signal.SIGTERM)  # TerminateProcess on Windows
@@ -719,20 +726,6 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
     out(f"{action}: {__version__} ({(old_sha or '?')[:7]}) -> {tag_version(tag)} ({sha[:7]}) dari {repo}")
     if IS_WINDOWS:
         return _windows_manual(repo, tag, sha, old_sha, human, out)
-    stopped = stop_ondemand_ui()  # our own idle-stopping web UI may simply be stopped
-    if "dihentikan" in stopped:
-        out("  " + stopped)
-    users = other_users()
-    if users is None:
-        out("  PERINGATAN: daftar proses tidak bisa dibaca; pastikan agen/harness dan web UI yang memakai Agent Loadout "
-            "sudah ditutup.")
-    elif users:
-        out("upgrade ditolak: proses lain masih memakai Agent Loadout ini (biasanya server MCP sebuah agen/harness, "
-            "atau web UI):")
-        for p, cmd in users:
-            out(f"  pid {p}: {cmd}")
-        out("Tutup agen/harness itu dulu (dan `agentloadout ui`), lalu ulangi `agentloadout upgrade`.")
-        return 2
     if not yes:
         if not sys.stdin.isatty():
             out("Tidak ada terminal untuk konfirmasi. Jalankan dengan --yes.")
@@ -740,6 +733,10 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
         if (ask or input)("Lanjutkan? [y/N] ").strip().lower() not in ("y", "ya", "yes"):
             out("Dibatalkan.")
             return 1
+    stopped = stop_ondemand_ui()  # our own idle-stopping web UI is simply stopped (only after the user said yes)
+    if "dihentikan" in stopped:
+        out("  " + stopped)
+    _warn_other_users(out)
     from .web import server as _web  # noqa: F401  (load now: after uv rebuilds the venv, lazy imports would read new files)
     python = base_python()
     entry = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "from": __version__, "from_sha": old_sha,
@@ -780,6 +777,20 @@ def _upgrade_locked(info, repo, to, pre, yes, force_insecure, out, ask) -> int:
     _say(out, f"  [GAGAL] {why}")
     _restore_old(repo, old_sha, python, entry, out)
     return 1
+
+
+def _warn_other_users(out):
+    """Linux/macOS: replacing a venv that other processes use does not break it; they just keep running the old
+    code until restarted (H17). So other users are reported, never a reason to refuse (W6, K8)."""
+    users = other_users()
+    if users is None:
+        out("  PERINGATAN: daftar proses tidak bisa dibaca; agen/harness atau web UI yang sedang berjalan tetap "
+            "memakai versi lama sampai dimulai ulang.")
+    elif users:
+        out("  PERINGATAN: proses ini masih memakai versi lama sampai dimulai ulang:")
+        for p, cmd in users:
+            out(f"    pid {p}: {cmd}")
+        out("  Mulai sesi baru di agen/harness itu (dan web UI) setelah upgrade.")
 
 
 def _say(out, text):

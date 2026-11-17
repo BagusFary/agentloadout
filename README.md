@@ -239,9 +239,13 @@ and run that `recover` command, or reinstall a release:
 `uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.5.1"`. Your data in
 `%APPDATA%\agentloadout` is never touched by a reinstall. Windows is not tested automatically yet.
 
-On every OS, `upgrade` now refuses to run while another process still uses the installed program (an
-agent's MCP server or a web UI started outside the upgrade) and names it; an on-demand web UI of the same
-instance is stopped first.
+**Coming from v0.5.0 on Windows:** do not run `agentloadout upgrade` to reach v0.5.1, because the
+`upgrade` of v0.5.0 still has the broken code. Close all agents and `agentloadout ui`, then run
+`uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.5.1"` yourself.
+
+On Linux and macOS, `upgrade` names other processes that still use the installed program (an agent's MCP
+server, a web UI) as a warning and goes on: they keep running the old version until you start a new
+session or restart the web UI. After you confirm, an on-demand web UI of the same instance is stopped.
 
 ## Settings: GitHub token
 

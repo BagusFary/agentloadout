@@ -312,7 +312,7 @@ def _uv_wrapper(tmp_path, mode):
     d = tmp_path / f"uvwrap-{mode}"
     d.mkdir()
     body = {"fail": 'echo "error: Failed to fetch (simulated)" >&2; exit 2',
-            "slow": f'sleep 4; exec "{real}" "$@"',
+            "slow": f'touch "$AL_MARK"; sleep 4; exec "{real}" "$@"',
             # like uv cut off while installing (H18): the package is gone, then it hangs until a signal arrives;
             # the rollback (its ref is $AL_KEEP) goes to the real uv
             "break": (f'case "$*" in *"$AL_KEEP"*) exec "{real}" "$@";; esac; '
@@ -341,21 +341,23 @@ def test_upgrade_holds_its_locks_until_verified(sb, repos, tmp_path):
     sb.catalog()
     tool = Tool(sb, repos)
     wrap = _uv_wrapper(tmp_path, "slow")
-    env = {**tool.env, "PATH": f"{wrap}:{tool.env['PATH']}"}
+    mark = tmp_path / "uv-started.mark"  # written by the uv wrapper: every check before the install is done (W7)
+    env = {**tool.env, "PATH": f"{wrap}:{tool.env['PATH']}", "AL_MARK": str(mark)}
+    web = sb.ui()
     p = subprocess.Popen([str(tool.bin), "upgrade", "--yes"], env=env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    web = sb.ui()
     try:
-        held = False
-        for _ in range(100):
-            try:
-                fd = filelock.acquire(sb.al / "refresh.lock", blocking=False)
-                filelock.release(fd)
-            except BlockingIOError:
-                held = True
+        import time
+        for _ in range(600):
+            if mark.exists() or p.poll() is not None:
                 break
-            import time
             time.sleep(0.1)
+        assert mark.exists(), "uv was never started"
+        try:
+            filelock.release(filelock.acquire(sb.al / "refresh.lock", blocking=False))
+            held = False
+        except BlockingIOError:
+            held = True
         assert held, "the upgrade did not take the refresh lock"
         st = web.request("GET", "/api/status")["json"]  # S19: the web says it is an upgrade, not a catalog refresh
         assert st["running"] and st["progress"]["label"] == "Agent Loadout sedang di-upgrade" and st["eta_seconds"] is None
@@ -553,22 +555,43 @@ def test_other_users_finds_processes_of_this_venv_but_not_itself(tmp_path):
     assert selfupdate.other_users(prefix, None) is not None  # this Linux box can list processes
 
 
-def test_upgrade_refused_while_an_agent_mcp_uses_the_venv(sb, repos):
+def test_agent_upgrade_works_while_its_own_mcp_runs(sb, repos):
+    """W6: an agent's MCP server (a child of the harness, not of `upgrade`) only produces a warning on Linux."""
     tool = Tool(sb, repos)
-    before = tool.state()
-    mcp = subprocess.Popen([str(tool.bin), "mcp"], env=tool.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                           stderr=subprocess.DEVNULL)
+    harness = subprocess.Popen(["/bin/sh", "-c", f'exec "{tool.bin}" mcp'], env=tool.env, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
         import time
         time.sleep(1)
-        r = tool.cli("upgrade", "--yes")
-        assert r.returncode == 2 and "proses lain masih memakai" in r.stdout and f"pid {mcp.pid}" in r.stdout, r.stdout
-        assert tool.state() == before
+        r = tool.cli("upgrade", "--yes", extra={"CLAUDECODE": "1"})
+        assert r.returncode == 0, r.stdout
+        assert "PERINGATAN: proses ini masih memakai versi lama" in r.stdout and f"pid {harness.pid}" in r.stdout
+        assert "ditolak" not in r.stdout
+        assert tool.state() == ("0.4.1", repos["shas"]["v0.4.1"])
+        assert harness.poll() is None  # never killed: the user restarts the session
     finally:
-        mcp.kill()
-        mcp.wait()
-    r = tool.cli("upgrade", "--yes")  # nothing else running: the normal Linux upgrade still works
-    assert r.returncode == 0 and tool.state() == ("0.4.1", repos["shas"]["v0.4.1"]), r.stdout
+        harness.kill()
+        harness.wait()
+
+
+def test_answering_no_keeps_the_web_ui(sb, repos):
+    """S25: the on-demand web UI is only stopped after the user confirmed the upgrade."""
+    tool = Tool(sb, repos)
+    sb.catalog()
+    web = subprocess.Popen([str(tool.bin), "ui", "--on-demand"], env=tool.env, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    try:
+        import time
+        for _ in range(100):
+            if (sb.al / "ui.json").exists():
+                break
+            time.sleep(0.1)
+        rc, out = tool.pty("upgrade", answers=[("Lanjutkan", "n")])
+        assert rc == 1 and "Dibatalkan" in out and "dihentikan" not in out
+        assert web.poll() is None
+    finally:
+        web.kill()
+        web.wait()
 
 
 def test_stop_ondemand_ui_without_proc(sb, monkeypatch):
@@ -592,3 +615,32 @@ def test_stop_ondemand_ui_without_proc(sb, monkeypatch):
     assert "dihentikan" in msg, msg
     web.proc.wait(10)
     assert web.proc.returncode is not None
+
+
+def test_stop_ondemand_ui_with_an_old_ui_json(sb, monkeypatch):
+    """S26: a ui.json written by v0.5.0 has no on_demand field; /proc decides where it exists, else only a note."""
+    import builtins
+    from agentloadout import selfupdate
+    sb.catalog()
+    monkeypatch.setenv("AGENTLOADOUT_HOME", str(sb.al))
+
+    def old_style():
+        info = json.loads((sb.al / "ui.json").read_text())
+        info.pop("on_demand")
+        (sb.al / "ui.json").write_text(json.dumps(info))
+
+    web = sb.ui("--on-demand")
+    old_style()
+    assert "dihentikan" in selfupdate.stop_ondemand_ui()
+    web.proc.wait(10)
+    plain = sb.ui()
+    old_style()
+    assert "masih versi lama" in selfupdate.stop_ondemand_ui() and plain.proc.poll() is None
+    plain.stop()
+    web = sb.ui("--on-demand")
+    old_style()
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open", lambda p, *a, **k: (_ for _ in ()).throw(OSError("no /proc"))
+                        if str(p).startswith("/proc") else real_open(p, *a, **k))
+    assert "masih versi lama" in selfupdate.stop_ondemand_ui() and web.proc.poll() is None  # no /proc: note only
+    web.stop()
