@@ -97,7 +97,8 @@ def test_menu_shows_banner_status_and_exits_cleanly(sb):
     out = res["out"]
     assert res["rc"] == 0 and "Keluar." in out and "Traceback" not in out
     assert "#   #  ###  ##### #   #   #   #####" in out and "Sehari-hari" in out and "Instalasi & perawatan" in out
-    assert "v0.5.0" in out and "katalog belum ada" in out
+    from agentloadout import __version__
+    assert f"v{__version__}" in out and "katalog belum ada" in out
     assert not (sb.al / "catalog.db").exists()  # the status line never creates the catalog (H12)
     assert all(ord(c) < 0x80 for c in out), "menu output must be plain ASCII"
     assert "\x1b[" not in out  # NO_COLOR

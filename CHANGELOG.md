@@ -4,6 +4,24 @@ All notable changes to Agent Loadout. Format: [Keep a Changelog](https://keepach
 versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the section of the new version
 (read from this file at the release commit), so every release needs an entry here (see RELEASING.md).
 
+## [0.5.1]
+
+### Fixed
+- Windows: `agentloadout upgrade` could leave a broken install (`ModuleNotFoundError: No module named
+  'agentloadout'`). On Windows it now prints safe manual steps (close agents, `uv tool install --force` by
+  commit, check the version) instead of reinstalling itself; recorded as `manual` in the upgrade history.
+- The installed version and commit are read in a layout-independent way (Windows `Lib\site-packages`), so
+  verification and rollback no longer always fail there.
+- `uv tool install --python` gets the base interpreter, never one inside the tool's own folder.
+- Output that a Windows code page cannot show no longer stops a rollback; child output is read as UTF-8.
+- Stopping the on-demand web UI after an upgrade no longer needs `/proc`.
+
+### Changed
+- `upgrade` names other processes that still use the installed program (an agent's MCP server, a web UI):
+  a warning on Linux/macOS (they keep the old version until restarted), part of the manual steps on Windows.
+  The instance's own on-demand web UI is stopped only after the upgrade is confirmed, also when it was
+  started by v0.5.0. Windows is marked experimental; from v0.5.0 on Windows, reach v0.5.1 by hand.
+
 ## [0.5.0] - 2026-11-16
 
 ### Added

@@ -312,7 +312,7 @@ def _uv_wrapper(tmp_path, mode):
     d = tmp_path / f"uvwrap-{mode}"
     d.mkdir()
     body = {"fail": 'echo "error: Failed to fetch (simulated)" >&2; exit 2',
-            "slow": f'sleep 4; exec "{real}" "$@"',
+            "slow": f'touch "$AL_MARK"; sleep 4; exec "{real}" "$@"',
             # like uv cut off while installing (H18): the package is gone, then it hangs until a signal arrives;
             # the rollback (its ref is $AL_KEEP) goes to the real uv
             "break": (f'case "$*" in *"$AL_KEEP"*) exec "{real}" "$@";; esac; '
@@ -341,21 +341,23 @@ def test_upgrade_holds_its_locks_until_verified(sb, repos, tmp_path):
     sb.catalog()
     tool = Tool(sb, repos)
     wrap = _uv_wrapper(tmp_path, "slow")
-    env = {**tool.env, "PATH": f"{wrap}:{tool.env['PATH']}"}
+    mark = tmp_path / "uv-started.mark"  # written by the uv wrapper: every check before the install is done (W7)
+    env = {**tool.env, "PATH": f"{wrap}:{tool.env['PATH']}", "AL_MARK": str(mark)}
+    web = sb.ui()
     p = subprocess.Popen([str(tool.bin), "upgrade", "--yes"], env=env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    web = sb.ui()
     try:
-        held = False
-        for _ in range(100):
-            try:
-                fd = filelock.acquire(sb.al / "refresh.lock", blocking=False)
-                filelock.release(fd)
-            except BlockingIOError:
-                held = True
+        import time
+        for _ in range(600):
+            if mark.exists() or p.poll() is not None:
                 break
-            import time
             time.sleep(0.1)
+        assert mark.exists(), "uv was never started"
+        try:
+            filelock.release(filelock.acquire(sb.al / "refresh.lock", blocking=False))
+            held = False
+        except BlockingIOError:
+            held = True
         assert held, "the upgrade did not take the refresh lock"
         st = web.request("GET", "/api/status")["json"]  # S19: the web says it is an upgrade, not a catalog refresh
         assert st["running"] and st["progress"]["label"] == "Agent Loadout sedang di-upgrade" and st["eta_seconds"] is None
@@ -444,3 +446,207 @@ def test_sigkill_leaves_a_trace_and_the_recovery_command(sb, repos, tmp_path):
     assert "terputus sebelum selesai" not in tool.cli("where").stdout  # settled: the install is healthy
     assert tool.history()[-1]["status"] == "interrupted"
     _locks_free(sb)
+
+
+# ------------------------------------------------------------------ BUG-01: Windows (v0.5.1)
+def _fake_venv(root: Path, windows: bool, version="0.5.1", commit="c" * 40):
+    site = root / ("Lib/site-packages" if windows else f"lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages")
+    d = site / f"agentloadout-{version}.dist-info"
+    d.mkdir(parents=True)
+    (d / "METADATA").write_text(f"Metadata-Version: 2.4\nName: agentloadout\nVersion: {version}\n")
+    (d / "direct_url.json").write_text(json.dumps({"url": "x", "vcs_info": {"vcs": "git", "commit_id": commit}}))
+    return root
+
+
+def test_dist_info_is_found_in_a_windows_layout(tmp_path, monkeypatch):
+    from agentloadout import selfupdate
+    win = _fake_venv(tmp_path / "win", windows=True)
+    lin = _fake_venv(tmp_path / "lin", windows=False, commit="d" * 40)
+    assert selfupdate.read_dist(str(win), windows=True) == {"version": "0.5.1", "commit": "c" * 40}
+    assert selfupdate.read_dist(str(lin), windows=False) == {"version": "0.5.1", "commit": "d" * 40}
+    monkeypatch.setattr(selfupdate, "IS_WINDOWS", True)
+    monkeypatch.setattr(sys, "prefix", str(win))
+    assert selfupdate.disk_version() == "0.5.1"
+    monkeypatch.setattr(selfupdate, "_bin", lambda: str(tmp_path / "missing.exe"))
+    monkeypatch.setattr(selfupdate, "_venv_python", lambda: str(tmp_path / "missing-python.exe"))
+    assert selfupdate._installed() == (None, "c" * 40)  # interpreter gone (half-removed venv): files still read
+
+
+def test_base_python_never_points_into_the_tool_venv(tmp_path, monkeypatch):
+    from agentloadout import selfupdate
+    tools = tmp_path / "tools"
+    inside = tools / "agentloadout" / "Scripts" / "python.exe"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("")  # a copy of the launcher, as on Windows
+    monkeypatch.setenv("UV_TOOL_DIR", str(tools))
+    monkeypatch.setattr(sys, "_base_executable", str(inside), raising=False)
+    assert selfupdate.base_python() == f"{sys.version_info.major}.{sys.version_info.minor}"
+    outside = tmp_path / "py" / "python3"
+    outside.parent.mkdir()
+    outside.write_text("")
+    monkeypatch.setattr(sys, "_base_executable", str(outside), raising=False)
+    monkeypatch.setattr(sys, "executable", str(inside))  # realpath(sys.executable) would stay inside
+    assert selfupdate.base_python() == str(outside.resolve())
+
+
+def test_cp1252_pipe_still_rolls_back(sb, repos):
+    """Agents read the output through a pipe; on Windows that is cp1252. Nothing printed may stop the rollback."""
+    tool = Tool(sb, repos, which="broken")
+    before = tool.state()
+    r = tool.cli("upgrade", "--yes", extra={"PYTHONIOENCODING": "cp1252"})
+    assert r.returncode == 1 and "kembali ke 0.4.0" in r.stdout and "Traceback" not in r.stderr, (r.stdout, r.stderr)
+    assert tool.state() == before
+    h = tool.history()
+    assert h[-1]["status"] == "failed" and h[-1]["rollback"] == "ok"
+    assert not [e for e in h if e.get("status") == "running"]
+
+
+def test_safe_output_never_raises():
+    from agentloadout import selfupdate
+    seen = []
+
+    def cp1252_pipe(text):
+        text.encode("cp1252")
+        seen.append(text)
+
+    emit = selfupdate._safe(cp1252_pipe)
+    emit("  ✗ gagal → rollback")
+    assert seen == ["  ? gagal ? rollback"]
+
+
+def test_windows_prints_manual_steps_and_never_runs_uv(tmp_path, monkeypatch, capsys):
+    from agentloadout import selfupdate
+    monkeypatch.setenv("AGENTLOADOUT_HOME", str(tmp_path / "al"))
+    monkeypatch.setattr(selfupdate, "IS_WINDOWS", True)
+    old, new = "a" * 40, "b" * 40
+    monkeypatch.setattr(selfupdate, "install_kind", lambda: {"kind": "uv-tool-git", "url": selfupdate.REPO, "commit": old,
+                                                             "prefix": str(tmp_path / "tools" / "agentloadout")})
+    monkeypatch.setattr(selfupdate, "releases", lambda repo, pre=False: [(selfupdate.parse_tag("v9.9.9"), "v9.9.9", new)])
+    monkeypatch.setattr(selfupdate, "other_users", lambda *a, **k: [(4242, "Scripts\\agentloadout.exe mcp")])
+
+    def no_uv(*a, **k):
+        raise AssertionError("uv must not run on Windows")
+
+    monkeypatch.setattr(selfupdate, "_uv_install", no_uv)
+    monkeypatch.setattr(selfupdate, "backup_state", no_uv)
+    assert selfupdate.upgrade(yes=True) == 0
+    out = capsys.readouterr().out
+    assert f'uv tool install --force "git+{selfupdate.REPO}@{new}"' in out
+    assert "Tutup semua agen" in out and "pid 4242" in out and "agentloadout --version" in out
+    assert f"@{old}" in out  # the way back
+    h = selfupdate.read_history()[-1]
+    assert h["status"] == "manual" and h["to_sha"] == new and h["from_sha"] == old
+    assert all(ord(c) < 0x80 for c in out)
+
+
+def test_other_users_finds_processes_of_this_venv_but_not_itself(tmp_path):
+    import os as _os
+    from agentloadout import selfupdate
+    prefix = str(tmp_path / "tools" / "agentloadout")
+    me, parent = _os.getpid(), _os.getppid()
+    procs = {me: (parent, f"{prefix}/bin/python {prefix}/bin/agentloadout upgrade --yes"),
+             parent: (1, f"script -qc {prefix}/bin/agentloadout upgrade"),
+             4242: (1, f"{prefix}/bin/python {prefix}/bin/agentloadout mcp"),
+             4343: (1, f"{prefix}/bin/python -m agentloadout.cli ui --on-demand"),
+             4444: (1, "/usr/bin/python3 something-else"),
+             4545: (1, f"{prefix}-other/bin/python")}
+    hits = selfupdate.other_users(prefix, procs)
+    assert [p for p, _ in hits] == [4242, 4343] and "bin/agentloadout mcp" in hits[0][1]
+    assert selfupdate.other_users(prefix, None) is not None  # this Linux box can list processes
+
+
+def test_agent_upgrade_works_while_its_own_mcp_runs(sb, repos):
+    """W6: an agent's MCP server (a child of the harness, not of `upgrade`) only produces a warning on Linux."""
+    tool = Tool(sb, repos)
+    harness = subprocess.Popen(["/bin/sh", "-c", f'exec "{tool.bin}" mcp'], env=tool.env, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        # wait for the MCP handshake (all imports done), like a harness session that is already running (Q1)
+        import select
+        harness.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",'
+                            b'"capabilities":{},"clientInfo":{"name":"t","version":"1"}}}\n')
+        harness.stdin.flush()
+        ready, _, _ = select.select([harness.stdout], [], [], 60)
+        assert ready, "MCP did not answer initialize within 60 s"
+        assert "result" in json.loads(harness.stdout.readline())
+        r = tool.cli("upgrade", "--yes", extra={"CLAUDECODE": "1"})
+        assert r.returncode == 0, r.stdout
+        assert "PERINGATAN: proses ini masih memakai versi lama" in r.stdout and f"pid {harness.pid}" in r.stdout
+        assert "ditolak" not in r.stdout
+        assert tool.state() == ("0.4.1", repos["shas"]["v0.4.1"])
+        assert harness.poll() is None  # never killed: the user restarts the session
+    finally:
+        harness.kill()
+        harness.wait()
+
+
+def test_answering_no_keeps_the_web_ui(sb, repos):
+    """S25: the on-demand web UI is only stopped after the user confirmed the upgrade."""
+    tool = Tool(sb, repos)
+    sb.catalog()
+    web = subprocess.Popen([str(tool.bin), "ui", "--on-demand"], env=tool.env, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    try:
+        import time
+        for _ in range(100):
+            if (sb.al / "ui.json").exists():
+                break
+            time.sleep(0.1)
+        rc, out = tool.pty("upgrade", answers=[("Lanjutkan", "n")])
+        assert rc == 1 and "Dibatalkan" in out and "dihentikan" not in out
+        assert web.poll() is None
+    finally:
+        web.kill()
+        web.wait()
+
+
+def test_stop_ondemand_ui_without_proc(sb, monkeypatch):
+    import builtins
+    from agentloadout import selfupdate
+    sb.catalog()
+    monkeypatch.setenv("AGENTLOADOUT_HOME", str(sb.al))
+    real_open = builtins.open
+
+    def no_proc(path, *a, **k):
+        if str(path).startswith("/proc"):
+            raise OSError("no /proc on this system")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", no_proc)
+    plain = sb.ui()
+    assert "masih versi lama" in selfupdate.stop_ondemand_ui() and plain.proc.poll() is None  # not ours to stop
+    plain.stop()
+    web = sb.ui("--on-demand")
+    msg = selfupdate.stop_ondemand_ui()
+    assert "dihentikan" in msg, msg
+    web.proc.wait(10)
+    assert web.proc.returncode is not None
+
+
+def test_stop_ondemand_ui_with_an_old_ui_json(sb, monkeypatch):
+    """S26: a ui.json written by v0.5.0 has no on_demand field; /proc decides where it exists, else only a note."""
+    import builtins
+    from agentloadout import selfupdate
+    sb.catalog()
+    monkeypatch.setenv("AGENTLOADOUT_HOME", str(sb.al))
+
+    def old_style():
+        info = json.loads((sb.al / "ui.json").read_text())
+        info.pop("on_demand")
+        (sb.al / "ui.json").write_text(json.dumps(info))
+
+    web = sb.ui("--on-demand")
+    old_style()
+    assert "dihentikan" in selfupdate.stop_ondemand_ui()
+    web.proc.wait(10)
+    plain = sb.ui()
+    old_style()
+    assert "masih versi lama" in selfupdate.stop_ondemand_ui() and plain.proc.poll() is None
+    plain.stop()
+    web = sb.ui("--on-demand")
+    old_style()
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open", lambda p, *a, **k: (_ for _ in ()).throw(OSError("no /proc"))
+                        if str(p).startswith("/proc") else real_open(p, *a, **k))
+    assert "masih versi lama" in selfupdate.stop_ondemand_ui() and web.proc.poll() is None  # no /proc: note only
+    web.stop()

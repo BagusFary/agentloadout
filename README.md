@@ -218,6 +218,35 @@ restart the web UI; an on-demand web UI started by an agent is stopped automatic
 - `agentloadout update` is not a command: it points to `upgrade`. `check-updates` is about installed MCP
   servers and skills.
 
+## Windows (experimental)
+
+Installing and using Agent Loadout on Windows is supported; upgrading itself automatically is not yet.
+Windows locks files that a running program uses, and `uv tool install --force` rebuilds the tool's folder
+in place, so an upgrade while Agent Loadout is running (the `upgrade` command itself, an agent's MCP
+server, `agentloadout ui`) can leave a half-removed install (`ModuleNotFoundError: No module named
+'agentloadout'`). Therefore on Windows `agentloadout upgrade` only prints the steps; do them yourself:
+
+1. Close every agent/harness that uses Agent Loadout (Claude Code, Codex, Cursor, OpenBot, ...) and any
+   `agentloadout ui` window. `upgrade` lists the processes it still sees.
+2. In a new PowerShell window run the command it printed, for example
+   `uv tool install --force "git+https://github.com/BagusFary/agentloadout@<commit>"`.
+   On "Access is denied" repeat step 1; if it still fails, `uv tool uninstall agentloadout` and run it again.
+3. Check `agentloadout --version`, then open your agents again (the MCP path does not change).
+
+The attempt is recorded with `status: manual` in `%APPDATA%\agentloadout\upgrade_history.json`, together
+with the command to go back (`recover`). If `agentloadout` no longer starts, close everything as in step 1
+and run that `recover` command, or reinstall a release:
+`uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.5.1"`. Your data in
+`%APPDATA%\agentloadout` is never touched by a reinstall. Windows is not tested automatically yet.
+
+**Coming from v0.5.0 on Windows:** do not run `agentloadout upgrade` to reach v0.5.1, because the
+`upgrade` of v0.5.0 still has the broken code. Close all agents and `agentloadout ui`, then run
+`uv tool install --force "git+https://github.com/BagusFary/agentloadout@v0.5.1"` yourself.
+
+On Linux and macOS, `upgrade` names other processes that still use the installed program (an agent's MCP
+server, a web UI) as a warning and goes on: they keep running the old version until you start a new
+session or restart the web UI. After you confirm, an on-demand web UI of the same instance is stopped.
+
 ## Settings: GitHub token
 
 The gear icon in the web UI opens **Pengaturan** (Settings): the GitHub token on top, then the security
