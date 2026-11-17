@@ -94,7 +94,21 @@
   </article>
 </div>
 
-<div id="toast" class="toast glass" hidden></div>
+<div id="manual" class="manual" hidden>
+  <div class="sheet-bg" data-mclose></div>
+  <div class="manual-card glass" role="dialog" aria-modal="true" aria-labelledby="manual-t" aria-describedby="manual-d">
+    <button class="close" type="button" data-mclose aria-label="Tutup">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <h3 id="manual-t">Salin manual</h3>
+    <p class="note" id="manual-d">Browser menolak salinan otomatis (biasanya karena koneksi tidak aman). Teks sudah dipilih: tekan <kbd>Ctrl</kbd> + <kbd>C</kbd> (Mac: <kbd>Cmd</kbd> + <kbd>C</kbd>), atau tekan lama lalu pilih Salin di HP.</p>
+    <textarea id="manual-text" readonly spellcheck="false" aria-label="Teks untuk disalin"></textarea>
+    <div class="actions"><button class="btn ghost" type="button" data-mclose>Selesai</button></div>
+  </div>
+</div>
+
+<div id="toast" class="toast glass" role="status" aria-live="polite" aria-atomic="true"></div>
+<script src="explain.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

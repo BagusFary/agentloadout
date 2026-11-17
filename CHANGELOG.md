@@ -4,6 +4,25 @@ All notable changes to Agent Loadout. Format: [Keep a Changelog](https://keepach
 versions follow `vMAJOR.MINOR.PATCH` git tags. `agentloadout upgrade` shows the section of the new version
 (read from this file at the release commit), so every release needs an entry here (see RELEASING.md).
 
+## [Unreleased]
+
+### Added
+- Web UI: a round copy button on every catalog card and a "Tanya agen tentang repo ini" section with a
+  preview in the item details copy a ready-made question for your own agent, asking it to explain the
+  repository in plain language (what it does, how it works, permissions, risks, alternatives) without
+  installing anything. The text uses only allow-listed catalog fields (name, link, kind, category, stars,
+  language, license, risk labels, known install clients), never the repository description or README, and
+  tells the agent that repository content is data, not instructions. It works in the read-only public view too.
+- When the browser blocks copying (for example over plain HTTP), a "Salin manual" dialog shows the text
+  already selected.
+
+### Changed
+- The install-prompt button in the item details is renamed "Salin perintah pasang".
+
+### Fixed
+- Copy buttons no longer report "Tersalin" when copying actually failed.
+- Toast messages are announced to screen readers (`role="status"`).
+
 ## [0.5.1]
 
 ### Fixed
