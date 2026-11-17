@@ -411,8 +411,6 @@ ul.changes li span { color: var(--muted); font-size: 12.5px; word-break: break-w
 .ask svg { width: 18px; height: 18px; flex: none; }
 .ask:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; background: var(--fill); color: var(--ink); }
 .ask:active { transform: scale(.92); background: var(--fill2); color: var(--ink); }
-.ask.done { background: color-mix(in srgb, var(--ok) 16%, var(--card)); color: var(--ok-ink); padding: 0 12px 0 9px; }
-.ask.fail { background: color-mix(in srgb, var(--hi) 14%, var(--card)); color: var(--hi-ink); padding: 0 12px 0 9px; }
 .ask.done svg, .ask.fail svg { width: 16px; height: 16px; }
 /* tooltip from data-tip (not title): shows on hover and on keyboard focus */
 .ask::after {
@@ -425,6 +423,9 @@ ul.changes li span { color: var(--muted); font-size: 12.5px; word-break: break-w
   .ask:hover::after { opacity: 1; }
 }
 .ask:focus-visible::after { opacity: 1; }
+/* after the hover/focus/active rules: Tersalin/Gagal keep their colours while the pointer is still on the button */
+.ask.done { background: color-mix(in srgb, var(--ok) 16%, var(--card)); color: var(--ok-ink); padding: 0 12px 0 9px; }
+.ask.fail { background: color-mix(in srgb, var(--hi) 14%, var(--card)); color: var(--hi-ink); padding: 0 12px 0 9px; }
 .ask.done::after, .ask.fail::after { display: none; }
 
 /* detail: "Tanya agen tentang repo ini" */

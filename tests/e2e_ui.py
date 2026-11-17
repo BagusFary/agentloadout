@@ -9,7 +9,8 @@ Run: uv run python tests/e2e_ui.py /path/to/katalog.db --chrome /path/to/chrome-
 - Chromium is driven over the DevTools pipe (no extra Python package, no open debugging port); clicks and
   keys are real input events, so copying runs with user activation.
 - With --axe, critical/serious axe violations are compared with the same pages of --baseline (the code
-  before this feature, from `git archive`): there must be no new rule and no rule with more nodes.
+  before this feature, from `git archive`): there must be no new KIND of violation (counts,
+  above all colour-contrast, vary between runs, so they are only printed).
 - With --shots, screenshots of the states go to DIR (for the design review).
 Exit code 0 when every check passes.
 """

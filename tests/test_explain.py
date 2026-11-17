@@ -295,3 +295,5 @@ def test_color_tokens_in_all_three_theme_blocks():
     for block in (dark, auto):
         assert "--ok-ink: #30d158" in block and "--hi-ink: #ff6961" in block
     assert ".card { position: relative; }" in css and ".ask:focus-visible::after" in css
+    # the done/fail colours must come after the hover rule of the same weight (else hover wins while pointing at it)
+    assert css.index(".ask.done {") > css.index(".ask:hover {") and css.index(".ask.fail {") > css.index(".ask:hover {")
