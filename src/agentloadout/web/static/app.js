@@ -1,7 +1,7 @@
 "use strict";
 const $ = (s) => document.querySelector(s);
 const state = { items: [], meta: {}, kind: "all", shown: 60 };
-const KIND_LABEL = { mcp: "MCP", skill: "Skill", app: "Aplikasi" };
+// KIND_LABEL and fmt come from explain.js (loaded first)
 
 const API_HEADERS = { "Content-Type": "application/json", "X-Agentloadout": "1" };
 async function api(path, body) {
@@ -13,7 +13,6 @@ async function api(path, body) {
 const HARNESS_NAME = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", openbot: "OpenBot", claude: "~/.claude/skills", agents: "~/.agents/skills" };
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n ?? 0));
 
 function ago(iso) {
   if (!iso) return "-";
@@ -30,12 +29,19 @@ function momentumText(it) {
   return `~${it.momentum < 10 ? it.momentum.toFixed(1) : Math.round(it.momentum)}/hari`;
 }
 
+// #toast is a live region (role=status) that always stays in the DOM: it is hidden with a class, and the
+// text is put in after it is shown, so screen readers announce it (H5).
 function toast(msg) {
   const t = $("#toast");
-  clearTimeout(toast._t); clearTimeout(toast._h);
-  t.classList.remove("out"); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); clearTimeout(toast._h); clearTimeout(toast._s);
+  t.textContent = "";
+  t.classList.remove("out"); t.classList.add("show");
   t.style.animation = "none"; void t.offsetWidth; t.style.animation = "";
-  toast._t = setTimeout(() => { t.classList.add("out"); toast._h = setTimeout(() => (t.hidden = true), 260); }, 2000);
+  toast._s = setTimeout(() => (t.textContent = msg), 30);
+  toast._t = setTimeout(() => {
+    t.classList.add("out");
+    toast._h = setTimeout(() => { t.classList.remove("show", "out"); t.textContent = ""; }, 260);
+  }, 2000);
 }
 
 function busy(btn, on, label) {
@@ -43,16 +49,98 @@ function busy(btn, on, label) {
   else { btn.classList.remove("busy"); if (btn._label != null) btn.innerHTML = btn._label; }
 }
 
-async function copy(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text; document.body.appendChild(ta); ta.select();
-    document.execCommand("copy"); ta.remove();
-  }
-  toast("Tersalin");
+// ---------------------------------------------------------------- copying
+// copyText resolves to true only when the text really reached the clipboard (H1). It must be called straight
+// from the click handler, without an await before it (user activation, H10).
+function execCopy(text) {
+  const back = document.activeElement;
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.readOnly = true; ta.setAttribute("aria-hidden", "true"); ta.tabIndex = -1;
+  ta.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+  document.body.appendChild(ta);
+  let ok = false;
+  try { ta.select(); ta.setSelectionRange(0, text.length); ok = document.execCommand("copy") === true; } catch { ok = false; }
+  ta.remove();
+  if (back && back.isConnected && typeof back.focus === "function") back.focus({ preventScroll: true });
+  return ok;
 }
+
+function copyText(text) {
+  const cb = window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText;
+  if (!cb) return Promise.resolve(execCopy(text));
+  let p;
+  try { p = navigator.clipboard.writeText(text); } catch { return Promise.resolve(execCopy(text)); }
+  return Promise.resolve(p).then(() => true, () => execCopy(text));
+}
+
+// older copy buttons (install snippets, "Salin perintah pasang"): toast on success, manual dialog on failure
+async function copy(text, origin, label) {
+  const ok = await copyText(text);
+  if (ok) toast("Tersalin"); else openManualCopy(text, origin, label);
+  return ok;
+}
+
+const ICON = {
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+};
+
+// "Tersalin" / "Gagal" on a copy button for 2 seconds; a new click restarts the timer
+function flash(btn, ok) {
+  if (btn._orig == null) btn._orig = btn.innerHTML;
+  clearTimeout(btn._t);
+  btn.classList.remove("done", "fail");
+  btn.classList.add(ok ? "done" : "fail");
+  btn.innerHTML = `${ok ? ICON.check : ICON.x}<span>${ok ? "Tersalin" : "Gagal"}</span>`;
+  btn._t = setTimeout(() => { btn.classList.remove("done", "fail"); btn.innerHTML = btn._orig; btn._orig = null; }, 2000);
+}
+
+// Copy-for-agent (card button and detail section): the text is built synchronously from catalog fields
+function copyExplain(it, btn) {
+  const text = it ? explainPrompt(it) : null;
+  if (text == null) { flash(btn, false); toast("Gagal: data repo ini tidak valid"); return; }
+  copyText(text).then((ok) => {
+    flash(btn, ok);
+    if (ok) toast("Tersalin. Tempel ke agenmu.");
+    else openManualCopy(text, btn, `Teks untuk agen, ${it.name || it.full_name}`);
+  });
+}
+
+// "Salin manual": the browser refused, so the text is shown selected for Ctrl/Cmd + C (H4: Esc closes only this)
+function openManualCopy(text, origin, label) {
+  const box = $("#manual"), ta = $("#manual-text");
+  box._origin = origin || document.activeElement;
+  ta.value = text;
+  ta.setAttribute("aria-label", label || "Teks untuk disalin");
+  box.hidden = false;
+  box._overflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+  ta.focus({ preventScroll: true }); ta.select(); ta.setSelectionRange(0, text.length); ta.scrollTop = 0;
+}
+
+function closeManualCopy() {
+  const box = $("#manual");
+  if (box.hidden) return;
+  box.hidden = true;
+  $("#manual-text").value = "";
+  document.body.style.overflow = box._overflow || "";
+  const o = box._origin;
+  box._origin = null;
+  const back = o && o.isConnected ? o : $("#b-explain");
+  if (back) back.focus({ preventScroll: true });
+}
+
+$("#manual").addEventListener("click", (e) => { if (e.target.closest("[data-mclose]")) closeManualCopy(); });
+$("#manual").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeManualCopy(); return; }
+  if (e.key !== "Tab") return;
+  // keep focus inside the dialog (aria-modal)
+  const f = [...$("#manual").querySelectorAll("button, textarea")].filter((x) => !x.disabled);
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 
 function hasUpdate(it) {
   const st = it.install_state;
@@ -107,6 +195,7 @@ function card(it) {
   const unchecked = it.checked === 0 ? '<span class="state wait" title="Detail repo (README, daftar skill, cara pasang) belum diambil karena kuota API GitHub habis. Dilengkapi di pembaruan berikutnya; token GitHub mempercepatnya.">Belum diperiksa</span>' : "";
   return `<article class="card" data-id="${esc(it.id)}">
     <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span><span>·</span><span class="owner">${esc(it.full_name.split("/")[0])} · ${esc(it.category)}</span>${stateBadge(it)}${unchecked}</div>
+    <button class="ask" type="button" data-explain aria-label="Salin penjelasan untuk agen: ${esc(it.name)}" data-tip="Salin penjelasan untuk agen">${ICON.copy}</button>
     <h3>${esc(it.name)}</h3>
     <p class="desc">${esc(it.description_id || it.description || "Tanpa deskripsi")}</p>
     <div class="stats"><span>★ ${fmt(it.stars)}</span><span class="hot">↑ ${momentumText(it)}</span><span>${ago(it.pushed_at)}</span>${(it.install || []).length ? "<span>Siap pasang</span>" : ""}</div>
@@ -237,12 +326,21 @@ function openDetail(id) {
     </div>${tgLine}`;
   } else {
     actions = `${tgLine}<div class="actions">
-      <button class="btn tinted" id="b-noah">Salin untuk agen</button>
+      <button class="btn tinted" id="b-noah">Salin perintah pasang</button>
       ${it.kind === "app" ? "" : `<button class="btn primary" id="b-install" ${canAct ? "" : "disabled"}>${multi ? "Pilih skill di bawah" : "Pasang…"}</button>`}
     </div>
     ${tg.length ? `<div class="actions"><button class="btn danger" id="b-unplug" ${canAct ? "" : "disabled"}>Lepas dari harness…</button></div>` : ""}`;
   }
-  const lockNote = !canAct ? `<p class="note lock">Pasang dan Lepas hanya bisa dari komputer ini atau perangkat Tailscale. Dari internet publik, katalog hanya bisa dilihat.</p>` : "";
+  const lockNote = !canAct ? `<p class="note lock">Pasang dan Lepas hanya bisa dari komputer ini atau perangkat Tailscale. Dari internet publik, katalog hanya bisa dilihat. Menyalin tetap bisa.</p>` : "";
+  // "Tanya agen" lives outside `actions`: shown for installed items too and in the read-only public view (H3)
+  const explain = explainPrompt(it);
+  const ask = `<div class="section ask-sec">
+      <div class="ask-head"><h4>Tanya agen tentang repo ini</h4>
+        <button class="btn-copy" type="button" id="b-explain">${ICON.copy}<span>Salin untuk agen</span></button></div>
+      <p class="note">Tempel ke agenmu (Claude Code, OpenBot, dan lainnya). Agen hanya diminta menjelaskan, tidak memasang apa pun.</p>
+      ${explain == null ? '<p class="note">Nama repo ini tidak valid, jadi teksnya tidak bisa dibuat.</p>'
+        : `<pre tabindex="0" aria-label="Pratinjau teks yang disalin">${esc(explain)}</pre>`}
+    </div>`;
   $("#detail").innerHTML = `<div class="detail">
     <div class="meta"><span class="dot ${it.kind}"></span><span class="kindtxt">${KIND_LABEL[it.kind]}</span><span>·</span><span>${esc(it.category)}</span>${stateBadge(it)}</div>
     <h2>${esc(it.name)}</h2>
@@ -253,6 +351,7 @@ function openDetail(id) {
     ${actions}
     ${lockNote}
     ${st.detail ? `<p class="note">Status: ${esc(st.status)} · ${esc(st.detail)}</p>` : ""}
+    ${ask}
     <div class="section"><h4>Risiko · label otomatis</h4>
       ${risks ? `<ul>${risks}</ul>` : '<p class="note">Tidak ada label otomatis. Tetap baca kode sebelum memasang.</p>'}</div>
     ${env ? `<div class="section"><h4>Variabel yang dibutuhkan</h4><ul>${env}</ul></div>` : ""}
@@ -262,12 +361,15 @@ function openDetail(id) {
     ${(it.topics || []).length ? `<div class="section"><h4>Topik</h4><div class="topics">${it.topics.map((t) => `<span>${esc(t)}</span>`).join("")}</div></div>` : ""}
   </div>`;
   $("#detail").querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
-    await copy(it.install[+b.dataset.copy].snippet);
+    const s = it.install[+b.dataset.copy];
+    if (!(await copy(s.snippet, b, `Perintah pasang, ${s.client}`))) return;
     b.textContent = "Tersalin"; b.classList.add("done");
     setTimeout(() => { b.textContent = "Salin"; b.classList.remove("done"); }, 1400);
   }));
   const on = (sel, fn) => { const b = $(sel); if (b && canAct) b.addEventListener("click", () => fn(b)); };
-  const bn = $("#b-noah"); if (bn) bn.addEventListener("click", () => copy(noahPrompt(it)));
+  const bn = $("#b-noah"); if (bn) bn.addEventListener("click", () => copy(noahPrompt(it), bn, "Perintah pasang untuk agen"));
+  // not through on(): copying stays possible in the read-only public view (H3)
+  const be = $("#b-explain"); if (be) be.addEventListener("click", () => copyExplain(it, be));
   on("#b-install", () => multi ? $(".skills")?.scrollIntoView({ behavior: "smooth" }) : openChooser(it, "install"));
   on("#b-unplug", () => openChooser(it, "remove"));
   on("#b-update", (b) => sendAction(it, "update", b));
@@ -560,7 +662,13 @@ let qTimer;
 $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(() => render(false), 140); });
 ["#cat", "#sort", "#f-install", "#f-safe", "#f-installed", "#f-unchecked"].forEach((s) => $(s).addEventListener("change", () => render()));
 new IntersectionObserver((ents) => { if (ents.some((e) => e.isIntersecting)) appendMore(); }, { rootMargin: "600px" }).observe($("#sentinel"));
-$("#grid").addEventListener("click", (e) => { const c = e.target.closest(".card"); if (c) openDetail(c.dataset.id); });
+$("#grid").addEventListener("click", (e) => {
+  const c = e.target.closest(".card");
+  if (!c) return;
+  const b = e.target.closest("[data-explain]");
+  if (b) { copyExplain(state.items.find((x) => x.id === c.dataset.id), b); return; }
+  openDetail(c.dataset.id);
+});
 $("#fresh").addEventListener("click", (e) => { const c = e.target.closest(".mini-card"); if (c) openDetail(c.dataset.id); });
 const THEMES = ["auto", "light", "dark"];
 const THEME_ICON = {
@@ -589,7 +697,7 @@ $("#theme").addEventListener("click", () => {
 });
 
 $("#sheet").addEventListener("click", (e) => { if (e.target.hasAttribute("data-close")) closeDetail(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#manual").hidden) closeDetail(); });
 loadHarnesses();
 refreshPlans(); setInterval(() => { if (!document.hidden) refreshPlans(); }, 15000);
 $("#pending").addEventListener("click", openPending);

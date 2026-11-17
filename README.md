@@ -166,6 +166,16 @@ agentloadout harnesses     # detected harnesses and config paths
 agentloadout where         # data, config and backup folders
 ```
 
+**Salin untuk agen.** Every card in the web UI has a round copy button, and the item details have a
+"Tanya agen tentang repo ini" section with a preview. It copies a ready-made question for your own agent:
+explain this repository in plain language (purpose, how it works, examples, permissions, risks,
+alternatives, fit) without installing anything. The text is built in the browser from short catalog fields
+only (name, link, kind, category, stars, language, license, risk labels, known install clients), each checked
+against an allow-list. The repository description, topics and README are never included, because they are
+written by the repository owner and could carry instructions for your agent; the agent reads the repository
+itself and is told that its content is data, not instructions. Copying also works in the read-only public
+view; when the browser blocks it (for example over plain HTTP), a "Salin manual" dialog shows the text selected.
+
 ## Upgrade
 
 ```bash
